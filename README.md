@@ -2,9 +2,9 @@
 
 This is a repo for conditional (semi-markovian) video modeling using generative models (specifically flow matching / stochastic interpolants).
 
-The original task studied here was defined by [RIVER]((https://github.com/Araachie/river). They conditionally model frame T+1 given frame T as well as a randomly chosen frame between 1 and T-1. Moreover, to save compute, the generative modeling is done in the latent space of a pre-trained VQVAE.
+The original task studied here was defined by [RIVER](https://github.com/Araachie/river). They conditionally model frame T+1 given frame T as well as a randomly chosen frame between 1 and T-1. Moreover, to save compute, the generative modeling is done in the latent space of a pre-trained VQVAE.
 
-Mark and collaborates then adapted this code to study the choice of interpolant 
+Mark and collaborators then adapted this code to study the choice of interpolant 
 and how it affects results (not so much to study the overall video modeling technique). We did this in the paper
 
 [Probabilistic Forecasting with Stochastic Interpolants and Föllmer Processes](https://arxiv.org/abs/2403.13724).
