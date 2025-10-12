@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 
-from custom_h5 import HDF5Maker
+from hdf5_helpers import HDF5Maker
 
 
 def get_seq(video_dirs, extension="png", image_size=64):
