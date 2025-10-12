@@ -133,17 +133,24 @@ def timestamp_embedding(timesteps, dim, scale=200, max_period=10000, repeat_only
 
 
 class VectorFieldRegressor(nn.Module):
-    def __init__(self, args, reference=True,):
+    def __init__(self, 
+        state_size = 4, 
+        state_res = [8, 8], 
+        inner_dim = 768, 
+        depth = 4, 
+        mid_depth = 5, 
+        out_norm = 'ln'
+    ):
         super(VectorFieldRegressor, self).__init__()
-        self.reference = reference
-        self.state_size = 4
-        self.state_res = [8, 8]
+        self.reference = True # whether to use the random context frame.
+        self.state_size = state_size
+        self.state_res = state_res
         self.state_height = self.state_res[0]
         self.state_width = self.state_res[1]
-        self.inner_dim = 768
-        self.depth = 4
-        self.mid_depth = 5
-        self.out_norm = 'ln'
+        self.inner_dim = inner_dim
+        self.depth = depth
+        self.mid_depth = mid_depth
+        self.out_norm = out_norm
         self.position_encoding = build_position_encoding(self.inner_dim, position_embedding_name="learned")
         self.project_in = nn.Sequential(
             Rearrange("b c h w -> b (h w) c"),

@@ -1,10 +1,3 @@
-
-# This source code is licensed under the license found in the
-# LICENSE file in the root directory of this source tree.
-
-"""
-A minimal training script for SiT using PyTorch DDP.
-"""
 import math
 import numpy as np
 import torch
@@ -37,9 +30,6 @@ from utils import TensorFolder
 import arch
 import vqvae
 import video_dataset
-#################################################################################
-#                                  Training Loop                                #
-#################################################################################
 
 class Trainer:
 
@@ -106,10 +96,10 @@ class Trainer:
 
     def setup_dirs_and_logging(self,):
         if self.rank == 0:
-            os.makedirs(self.args.results_dir, exist_ok=True)  # Make results folder (holds all experiment subfolders)
+            os.makedirs(self.args.results_dir, exist_ok=True)  
             experiment_name = f"{self.args.task}-{self.args.interpolant_type}"
-            experiment_dir = f"{self.args.results_dir}/{experiment_name}"  # Create an experiment folder
-            self.checkpoint_dir = f"{experiment_dir}/checkpoints"  # Stores saved model checkpoints
+            experiment_dir = f"{self.args.results_dir}/{experiment_name}"  
+            self.checkpoint_dir = f"{experiment_dir}/checkpoints"  
             os.makedirs(self.checkpoint_dir, exist_ok=True)
             self.logger = utils.create_logger(experiment_dir)
             self.logger.info(f"Experiment directory created at {experiment_dir}")
@@ -136,14 +126,24 @@ class Trainer:
         # taming vae does ckpt load automatically. todo handle custom river vae too.
         self.vae = vqvae.build_vqvae(self.args)
         self.vae.eval()
-        self.model = arch.VectorFieldRegressor(self.args) 
+        self.model = arch.VectorFieldRegressor(
+            state_size = self.args.model_state_size,
+            state_res = self.args.model_state_res,
+            inner_dim = self.args.model_inner_dim,
+            depth = self.args.model_depth,
+            mid_depth = self.args.model_mid_depth,
+            out_norm = self.args.model.out_norm,
+        )
         self.ema = deepcopy(self.model).to(self.device)  
         self.ema.eval()  
         utils.requires_grad(self.ema, False)
         self.model = DDP(self.model.to(self.device), device_ids=[self.rank])
         utils.update_ema(self.ema, self.model.module, decay=0)  
-        # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
-        self.opt = torch.optim.AdamW(self.model.parameters(), lr=self.args.base_lr, weight_decay=self.args.wd)
+        self.opt = torch.optim.AdamW(
+            self.model.parameters(), 
+            lr=self.args.base_lr, 
+            weight_decay=self.args.weight_decay
+        )
         self.maybe_load()
         self.logger.info(f"SiT Parameters: {sum(p.numel() for p in self.model.parameters()):,}")
 
@@ -152,12 +152,18 @@ class Trainer:
             data_path=os.path.join(self.args.data_path, split),
             input_size=self.args.input_size,
             crop_size=self.args.crop_size,
-            frames_per_sample=self.args.frames_per_sample,
-            skip_frames=0,
-            random_horizontal_flip=False,
-            aug=False,
-            albumentations=True,
+            frames_per_sample=self.args.num_observations,
+            skip_frames=self.args.skip_frames,
+            random_horizontal_flip=self.args.data_random_horizontal_flip,
+            aug=self.args.data_aug,
+            albumentations=self.args.data_albumentations,
         )
+
+
+            self.data_aug = False
+                        self.data_random_horizontal_flip = False
+                                    self.data_albumentations = True
+
 
     def setup_data(self,):
         self.datasets = {}
@@ -288,7 +294,7 @@ class Trainer:
     #    b = X_series.shape[0]
     #    Z_series = self.encode(X_series)
     #    ae_ours = self.config["autoencoder"]["type"] == "ours"
-    #    dec_fn = self.ae.backbone.decode_from_latents if ae_ours else self.ae.decode
+    #    dec_fn = self.vae.backbone.decode_from_latents if ae_ours else self.vae.decode
     #    # Decode to image space
     #    Z_series = rearrange(Z_series, "b n c h w -> (b n) c h w")
     #    X_series = dec_fn(Z_series)
@@ -348,6 +354,9 @@ class Trainer:
         loss = (vtheta - target).pow(2).sum(dim=[1,2,3]).mean()
         return loss
 
+
+
+
     def do_step(self, batch_num, x, y):
         if self.args.overfit:
             x = self.x_overfit
@@ -386,11 +395,15 @@ class Trainer:
         assert H == self.args.H_data
         assert W == self.args.W_data
         self.vae.eval()
+        # the repo uses two different classes for vqvaes.
+        # the kth dataset uses one from Taming Transformers
+        # the clevrer dataset uses one written by RIVER repo
+        # they have slightly different interfaces
         if self.args.vqvae_type == 'river':
-            Z = self.ae(xall).latents
+            Z = self.vae(xall).latents
         else:
             flat_xall = self.flatten(xall)
-            flat_Z = self.ae.encode(flat_xall)
+            flat_Z = self.vae.encode(flat_xall)
             Z = self.unflatten(flat_Z, n = xall.shape[1])
         return Z
 
@@ -469,8 +482,8 @@ class Trainer:
             bsz, new_num_obs = x.shape[0]
             new_num_obs = x.shape[1]
             new_bsz = min(4, bsz)
-            num_cond_frames = self.args.num_sampling_conditioning_frames
-            frames2gen = self.args.num_sampling_generation_frames
+            num_cond_frames = self.args.condition_frames
+            frames2gen = self.args.frames_to_generate
             assert num_cond_frames + frames2gen == new_num_obs
             xreal = x[ : new_bsz, : num_cond_frames + frames2gen]
             xcond = xreal[ : , : num_cond_frames]
@@ -562,37 +575,15 @@ class Trainer:
             Z_series = Z_series[:, 1:]
 
         ae_ours = (self.args.vqvae_type == 'river')
-        dec_fn = self.ae.backbone.decode_from_latents if ae_ours else self.ae.decode
+        dec_fn = self.vae.backbone.decode_from_latents if ae_ours else self.vae.decode
         # Decode to image space
         Z_series = rearrange(Z_series, "b n c h w -> (b n) c h w")
         X_series = dec_fn(Z_series)
         X_series = rearrange(X_series, "(b n) c h w -> b n c h w", b=b)
         return X_series
 
-def set_args_from_river_repo(args):
-    if args.task == 'kth':
-        args.C_data = 3
-        args.H_data = 64
-        args.W_data = 64
-        args.C_latent = 4
-        args.H_latent = 8
-        args.W_latent = 8
-        args.input_size = 64
-        args.crop_size = 64
-        args.frames_per_sample = 40
-        args.num_observations = 40
-        args.condition_frames = 10
-        args.frames_to_generation = 30
-        args.num_sampling_conditioning_frames = 10
-        args.num_sampling_generation_frames = 30
-        args.vqvae_type = "ldm-vq" # or river for custom.
-        args.vqvae_config = "f8_small"
-    else:
-        assert False
-    return args
-
 if __name__ == "__main__":
-    #os.environ['MPLCONFIGDIR'] = '/gpfs/scratch/goldsm20/.matplotcache'
+    
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.benchmark = False 
@@ -600,42 +591,22 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
      
     # paths
-    parser.add_argument('--data_path', type=str, default = "/mnt/home/mgoldstein/ceph/video/kth/data/hdf5s/")
-    parser.add_argument("--results_dir", type=str, default="/mnt/home/mgoldstein/ceph/video/kth/results")
-    parser.add_argument("--load_vqvae_ckpt_path", type=str, default='/mnt/home/mgoldstein/ceph/video/kth/checkpoints/vqvae.pt')
     parser.add_argument('--load_model_ckpt_path', type=str, default=None) # train from scratch
     parser.add_argument('--wandb_entity', type = str, default = 'marikgoldstein')
     parser.add_argument('--wandb_project', type = str, default = 'videointerpolants')
-    parser.add_argument('--interpolant_type', type = str, default = 'linear')
-    parser.add_argument('--task', type = str, default = 'kth')
-    parser.add_argument("--epochs", type=int, default=100000)
-    parser.add_argument('--limit_train_batches', type = int, default = -1)
-    parser.add_argument('--num_training_steps', type = int, default = 400_000)
-    parser.add_argument("--global_batch_size", type=int, default=256)
-    parser.add_argument('--num_workers', type=int, default=4)
-    parser.add_argument("--global_seed", type=int, default=0)
-    parser.add_argument("--update_ema_after", type=int, default = 10_000)
-    parser.add_argument("--update_ema_every", type =int, default = 1)
-    parser.add_argument("--print_every", type = int ,default = 100)
-    parser.add_argument("--log_every", type=int, default=100)
-    parser.add_argument("--save_every", type=int, default= 25_000)
-    parser.add_argument("--save_most_recent_every", type=int, default= 1_000)
-    parser.add_argument("--sample_every", type=int, default= 5_000)
+    parser.add_argument('--interpolant_type', type = str, choices = ['linear','ours'], default = 'linear')
+    parser.add_argument('--dataset', type = str, choices = ['kth', 'clevrer'], default = 'kth')
     parser.add_argument('--overfit', type = int, default = 0)
-    parser.add_argument('--num_classes', type = int, default = 1000)
-    parser.add_argument('--time_min_sample', type = float, default = 1e-4)
-    parser.add_argument('--time_max_sample', type = float, default = 1 - 1e-4)
-    parser.add_argument('--time_min_training', type = float, default = 1e-4)
-    parser.add_argument('--time_max_training', type = float, default = 1 - 1e-4)
-    parser.add_argument('--base_lr', type = float, default = 2e-4)
-    parser.add_argument('--min_lr', type = float, default = 1e-6)
-    parser.add_argument('--grad_clip_norm', type = float, default = 1)
-    parser.add_argument('--lr_warmup_steps', type = float, default = 10_000)
-    parser.add_argument('--lr_schedule', type = str, default = 'constant') # with warmup
-    parser.add_argument('--wd', type = float, default = 0)
-    parser.add_argument('--num_sampling_steps', type = int, default = 100)
     args = parser.parse_args()
     args = set_args_from_river_repo(args)
     args.overfit = bool(args.overfit)
-    trainer = Trainer(args)
+    config = configs.Config(
+        dataset = args.dataset,
+        overfit = args.overfit,
+        interpolant_type = args.interpolant_type,
+        load_model_ckpt_path = args.load_model_ckpt_path,
+        wandb_entity = args.wandb_entity,
+        wandb_project = args.wandb_project,
+    )
+    trainer = Trainer(config)
     trainer.training_loop()
