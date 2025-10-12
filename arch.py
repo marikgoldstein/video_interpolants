@@ -135,14 +135,15 @@ def timestamp_embedding(timesteps, dim, scale=200, max_period=10000, repeat_only
 class VectorFieldRegressor(nn.Module):
     def __init__(self, args, reference=True,):
         super(VectorFieldRegressor, self).__init__()
-	self.state_size = 4
-	self.state_res = [8, 8]
-	self.state_height = self.state_res[0]
+        self.reference = reference
+        self.state_size = 4
+        self.state_res = [8, 8]
+        self.state_height = self.state_res[0]
         self.state_width = self.state_res[1]
         self.inner_dim = 768
-	self.depth = 4
-	self.mid_depth = 5
-	self.out_norm = 'ln'
+        self.depth = 4
+        self.mid_depth = 5
+        self.out_norm = 'ln'
         self.position_encoding = build_position_encoding(self.inner_dim, position_embedding_name="learned")
         self.project_in = nn.Sequential(
             Rearrange("b c h w -> b (h w) c"),
@@ -165,15 +166,15 @@ class VectorFieldRegressor(nn.Module):
                 batch_first=True)
 
         self.in_blocks = nn.ModuleList()
-        self.mid_blocks = nn.Sequential(*[build_layer(self.inner_dim) for _ in range(mid_depth)])
+        self.mid_blocks = nn.Sequential(*[build_layer(self.inner_dim) for _ in range(self.mid_depth)])
         self.out_blocks = nn.ModuleList()
-        for i in range(depth):
+        for i in range(self.depth):
             self.in_blocks.append(build_layer(self.inner_dim))
             self.out_blocks.append(nn.ModuleList([
                 nn.Linear(2 * self.inner_dim, self.inner_dim),
                 build_layer(self.inner_dim)]))
 
-        if out_norm == "ln":
+        if self.out_norm == "ln":
             self.project_out = nn.Sequential(
                 nn.Linear(self.inner_dim, self.inner_dim),
                 nn.GELU(),
@@ -181,7 +182,7 @@ class VectorFieldRegressor(nn.Module):
                 Rearrange("b (h w) c -> b c h w", h=self.state_height),
                 nn.Conv2d(self.inner_dim, self.state_size, kernel_size=3, stride=1, padding=1),
             )
-        elif out_norm == "bn":
+        elif self.out_norm == "bn":
             self.project_out = nn.Sequential(
                 nn.Linear(self.inner_dim, self.inner_dim),
                 Rearrange("b (h w) c -> b c h w", h=self.state_height),

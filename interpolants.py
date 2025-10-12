@@ -8,7 +8,7 @@ class LinearInterpolant:
     def compute_xt(self, t, x0, x1):
         return self.wide(self.alpha(t)) * x0 + self.wide(self.beta(t)) * x1
 
-    def compute_xdot(self, t, x0, x1);
+    def compute_xdot(self, t, x0, x1):
         return self.wide(self.alpha_dot(t)) * x0 + self.wide(self.beta_dot(t)) * x1
 
     def wide(self, t):
@@ -34,7 +34,7 @@ class OurInterpolant:
     def compute_xt(self, t, x0, x1, noise):
         return self.wide(self.alpha(t)) * x0 + self.wide(self.beta(t)) * x1 + self.wide(self.gamma(t)) * noise
 
-    def compute_xdot(self, t, x0, x1, noise);
+    def compute_xdot(self, t, x0, x1, noise):
         return self.wide(self.alpha_dot(t)) * x0 + self.wide(self.beta_dot(t)) * x1 * self.wide(self.sigma_dot(t) * t.sqrt()) * noise
 
     def wide(self, t):

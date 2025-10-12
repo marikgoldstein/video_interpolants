@@ -21,3 +21,7 @@
 
 - their evaluation code isn’t great + not all pieces are included. FVD wasn’t included. I found a separate repo to compute that. 
 https://github.com/google-research/google-research/blob/20b2520e416edaea8c038bbf54cc1c739c542822/frechet_video_distance/README.md
+
+In more detail, we had started off with another project's repo. That project is called RIVER (https://github.com/Araachie/river). They conditionally model frame T+1 given frame T as well as a randomly chosen frame between 1 and T-1. But, RIVER's data preprocessing code actually depended on two more older repos  https://github.com/willi-menapace/PlayableVideoGeneration and https://github.com/edouardelasalles/srvp/. Unfortunately, some of the data processing steps were not well documented in the 3 repos and some steps have become outdated. For example, the KTH black-white video dataset (https://www.csc.kth.se/cvap/actions/) seems to have recently broken (the .zip links don't work for me?) such that the data is not downloadable anymore. A subset of the data is available here https://www.kaggle.com/datasets/alexeychinyaev/kth-video-dataset but this data has some videos missing. And I don't have access to my old copy anymore because I graduated from my phd.
+
+

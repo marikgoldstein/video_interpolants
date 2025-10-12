@@ -5,50 +5,41 @@
 """
 A minimal training script for SiT using PyTorch DDP.
 """
-import wandb
-import torch
-from torchvision.utils import make_grid
-import torch.distributed as dist
-from PIL import Image
-import os
-import argparse
-import hashlib
 import math
+import numpy as np
 import torch
+import torch.nn.functional as F
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision.datasets import ImageFolder
-from typing import List
-import numpy as np
-import torch
-import torch.nn.functional as F
 from torchvision.utils import make_grid
+import torch.distributed as dist
 from torchvision import transforms
-import numpy as np
-from collections import OrderedDict
 from PIL import Image
+import os
+import argparse
+import hashlib
+from typing import List
+from collections import OrderedDict
 from copy import deepcopy
 from glob import glob
 from time import time
 import argparse
 import logging
-import os
-from torchdiffeq import odeint
 import wandb
-from typing import List
-import torch
 
+# local stuff
 import interpolants
-from utils import Tensorfolder
-import river_arch
-import river_vqvae
-import river_video_dataset
+import utils
+from utils import TensorFolder
+import arch
+import vqvae
+import video_dataset
 #################################################################################
 #                                  Training Loop                                #
 #################################################################################
-#samples = vae.decode(samples / args.vae_scale).sample
 
 class Trainer:
 
@@ -59,8 +50,6 @@ class Trainer:
         self.setup_model()
         self.setup_data()
         self.train_steps = 0
-     	self.C_data, self.H_data, self.W_data = 3, 64, 64
-        self.C_dgm, self.H_dgm, self.W_dgm = 4, 8, 8
         self.setup_interpolant()
 
     def setup_interpolant(self,):
@@ -118,35 +107,37 @@ class Trainer:
     def setup_dirs_and_logging(self,):
         if self.rank == 0:
             os.makedirs(self.args.results_dir, exist_ok=True)  # Make results folder (holds all experiment subfolders)
-            experiment_name = f"{self.args.process_name}-{self.args.prior}-{self.args.base_lr}"
+            experiment_name = f"{self.args.task}-{self.args.interpolant_type}"
             experiment_dir = f"{self.args.results_dir}/{experiment_name}"  # Create an experiment folder
             self.checkpoint_dir = f"{experiment_dir}/checkpoints"  # Stores saved model checkpoints
             os.makedirs(self.checkpoint_dir, exist_ok=True)
-            self.logger = create_logger(experiment_dir)
+            self.logger = utils.create_logger(experiment_dir)
             self.logger.info(f"Experiment directory created at {experiment_dir}")
             wandb_dir = os.path.join(experiment_dir, 'wandb')
             utils.wandb_initialize(
-		self.args, 
+                self.args, 
                 entity=self.args.wandb_entity, 
                 project_name=self.args.wandb_project, 
                 directory=wandb_dir
             )
         else:
-            self.logger = create_logger(None)
+            self.logger = utils.create_logger(None)
 
     def maybe_load(self,):
-        if self.args.load_ckpt_path is not None:
+        if self.args.load_model_ckpt_path is not None:
             ckpt_path = self.args.load_ckpt_path
-            state_dict = find_model(ckpt_path)
+            state_dict = torch.load(ckpt_path, map_location=lambda storage, loc: storage)
             self.model.load_state_dict(state_dict["model"])
             self.ema.load_state_dict(state_dict["ema"])
             self.opt.load_state_dict(state_dict["opt"])
             self.args = state_dict["args"]
 
     def setup_model(self,):
-        self.vae = river_vqvae.build_vqvae(self.args, convert_to_sequence=True)
-        self.model = river_arch.VectorFieldRegressor(self.args) 
-	self.ema = deepcopy(self.model).to(self.device)  
+        # taming vae does ckpt load automatically. todo handle custom river vae too.
+        self.vae = vqvae.build_vqvae(self.args)
+        self.vae.eval()
+        self.model = arch.VectorFieldRegressor(self.args) 
+        self.ema = deepcopy(self.model).to(self.device)  
         self.ema.eval()  
         utils.requires_grad(self.ema, False)
         self.model = DDP(self.model.to(self.device), device_ids=[self.rank])
@@ -154,65 +145,73 @@ class Trainer:
         # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
         self.opt = torch.optim.AdamW(self.model.parameters(), lr=self.args.base_lr, weight_decay=self.args.wd)
         self.maybe_load()
-        self.process = processes.get_process(self.args)
-        self.vae = AutoencoderKL.from_pretrained("stabilityai/sd-vae-ft-ema").to(self.device)
-        self.vae.eval()
         self.logger.info(f"SiT Parameters: {sum(p.numel() for p in self.model.parameters()):,}")
 
     def get_video_datasets(self, split):
-	return river_video_dataset.VideoDataset(
-	    data_path=self.args.data_path,
-	    input_size=self.args.input_size,
-	    crop_size=self.args.crop_size,
-	    frames_per_sample=self.args.frames_per_sample,
-	    skip_frames=self.args.skip_Frames,
-	    random_horizontal_flip=self.args.random_horizontal_flip,
-	    aug=self.args.aug,
-	    albumentations=self.args.albumentations,
-	)
+        return video_dataset.VideoDataset(
+            data_path=os.path.join(self.args.data_path, split),
+            input_size=self.args.input_size,
+            crop_size=self.args.crop_size,
+            frames_per_sample=self.args.frames_per_sample,
+            skip_frames=0,
+            random_horizontal_flip=False,
+            aug=False,
+            albumentations=True,
+        )
 
     def setup_data(self,):
-	self.datasets = {}
-        self.datasets['train'] = self.get_video_datasets(config, split = 'train')
-        self.datasets['val'] = self.get_video_datasets(config, split = 'val')
-	self.sampler = torch.utils.data.RandomSampler(
-	    self.datasets["train"],
-	    replacement=True,
-	    num_samples=(self.args.local_batch_size * self.args.num_training_steps),
-	    generator=torch.Generator().manual_seed(config['local_seed'])
-	)
-  	self.dataloader = DataLoader(
-	    dataset=dataset,
-	    batch_size=self.args.local_batch_size,
-	    shuffle=False, 
-	    num_workers=self.args.num_workers,
-	    sampler=self.sampler,
-	    pin_memory=True,
-	    drop_last=True,
-	)
+        self.datasets = {}
+        self.datasets['train'] = self.get_video_datasets(split = 'train')
+        self.datasets['val'] = self.get_video_datasets(split = 'val')
+        self.sampler = torch.utils.data.RandomSampler(
+            self.datasets["train"],
+            replacement=True,
+            num_samples=(self.local_batch_size * self.args.num_training_steps),
+            generator=torch.Generator().manual_seed(self.seed)
+        )
+        self.train_dataloader = DataLoader(
+            dataset=self.datasets['train'],
+            batch_size=self.local_batch_size,
+            shuffle=False, 
+            num_workers=self.args.num_workers,
+            sampler=self.sampler,
+            pin_memory=True,
+            drop_last=True,
+        )
 
+        self.val_dataloader = DataLoader(
+            dataset=self.datasets['val'],
+            batch_size=self.local_batch_size,
+            shuffle=False, 
+            num_workers=self.args.num_workers,
+            sampler=self.sampler,
+            pin_memory=True,
+            drop_last=True,
+        )
 
     def array2grid(self, x):
-	nrow = round(math.sqrt(x.size(0)))
-	x = make_grid(x, nrow=nrow, normalize=True, value_range=(-1,1))
-	x = x.mul(255).add_(0.5).clamp_(0,255).permute(1,2,0).to('cpu', torch.uint8).numpy()
-	return x
+        nrow = round(math.sqrt(x.size(0)))
+        x = make_grid(x, nrow=nrow, normalize=True, value_range=(-1,1))
+        x = x.mul(255).add_(0.5).clamp_(0,255).permute(1,2,0).to('cpu', torch.uint8).numpy()
+        return x
 
     def wandb_arr_to_img(self, arr):
         return wandb.Image(self.array2grid(arr))
     
-    def plot_real_data(self,):
-        if self.is_main():
-            self.logger.info("Plotting real data...")
-            wandb.log({'real_data' : self.wandb_arr_to_img(self.x_overfit)}, step=0)
-        dist.barrier()
+    # TODO
+    #def plot_real_data(self,):
+    #    if self.is_main():
+    #        self.logger.info("Plotting real data...")
+    #        wandb.log({'real_data' : self.wandb_arr_to_img(self.x_overfit)}, step=0)
+    #    dist.barrier()
     
     def training_loop(self,):
         self.checkpoint(mode = 'init')
         self.logger.info(f"Training for {args.epochs} epochs...")
         # get 2nd batch, dont like first one 
-        self.x_overfit, self.y_overfit = next(iter(self.loader))
-        self.plot_real_data()
+        self.x_overfit = next(iter(self.train_dataloader))
+        # TODO
+        #self.plot_real_data()
         for epoch_num in range(self.args.epochs):
             if self.train_steps >= self.args.num_training_steps:
                 self.logger.info("Done. Breaking out of loop over epochs")
@@ -222,8 +221,7 @@ class Trainer:
         self.checkpoint(mode = 'final')
         self.logger.info("Done!")
         utils.ddp_cleanup()
-
-    
+ 
     def done_with_epoch(self, batch_num):
     
         done = False
@@ -244,7 +242,7 @@ class Trainer:
         self.sampler.set_epoch(epoch_num)
         self.logger.info(f"Beginning epoch {epoch_num}...")
 
-        for batch_num, (x, y) in enumerate(self.loader):
+        for batch_num, (x, y) in enumerate(self.train_dataloader):
 
             if self.done_with_epoch(batch_num):
                 break
@@ -353,7 +351,7 @@ class Trainer:
     def do_step(self, batch_num, x, y):
         if self.args.overfit:
             x = self.x_overfit
-      	x = batch[: , : self.args.num_observations]
+        x = batch[: , : self.args.num_observations]
         self.model.train()
         x = x.to(self.device)
         loss = self.loss_fn(x)
@@ -384,18 +382,17 @@ class Trainer:
     def vae_encode(self, x):
         assert len(x.shape) == 5
         bsz, frames, C, H, W = x.shape
-        assert C == self.C_data
-        assert H == self.H_data
-        assert W == self.W_data
+        assert C == self.args.C_data
+        assert H == self.args.H_data
+        assert W == self.args.W_data
         self.vae.eval()
-        Z = self.ae(xall).latents
-        #flat_xall = self.flatten(xall)
-        #flat_Z = self.ae.encode(flat_xall)
-        #Z = self.unflatten(flat_Z, n = xall.shape[1])
+        if self.args.vqvae_type == 'river':
+            Z = self.ae(xall).latents
+        else:
+            flat_xall = self.flatten(xall)
+            flat_Z = self.ae.encode(flat_xall)
+            Z = self.unflatten(flat_Z, n = xall.shape[1])
         return Z
-
-    def is_norm(self,):
-        return self.args.process_name == 'norm'
 
     def sample_time(self, bsz):
         t = torch.distributions.Uniform(
@@ -506,15 +503,13 @@ class Trainer:
 
         print("GENERATING FRAMES")
         # Generate future latents
-        
-      
-        tmin = self.config['T_min_sampling']
-        tmax = self.config['T_max_sampling']
-        steps = self.config['sampling_steps']
+        tmin = self.args.time_min_sample
+        tmax = self.args.time_max_sample
+        steps = self.args.num_sampling_steps
         tgrid = torch.linspace(tmin, tmax, steps).to(Z_series.device)
         ones = torch.ones(b).to(Z_series.device)
         
-        
+    
         for k in range(num_frames):
              
             if k % 5 == 0:
@@ -524,22 +519,18 @@ class Trainer:
             zcond, gap = get_random_cond(Z_series)
             
             zref = Z_series[:, -1]
-       
-            assert zref.shape == (b, self.C_dgm, self.H_dgm, self.W_dgm)
-            assert zcond.shape == (b, self.C_dgm, self.H_dgm, self.W_dgm)
-
-            if self.config['interpolant'] == 'theirs':
-
+    
+            assert zref.shape == (b, self.args.C_latent, self.args.H_latent, self.args.W_latent)
+            assert zcond.shape == (b, self.args.C_latent, self.args.H_latent, self.args.W_latent)
+            if self.args.interpolant_type == 'linear':
                 # ODE step
                 def f(t, zt):
                     t_arr = t * ones
-                    return self.vector_field_regressor(zt, t_arr, zref, zcond, gap)
-
+                    return self.model(zt, t_arr, zref, zcond, gap)
                 z0 = torch.randn([b, c, h ,w]).to(Z_series.device)
                 z1 = odeint(f, z0, tgrid, method='euler')[-1]
  
-            elif self.config['interpolant'] == 'ours':
-           
+            elif self.args.interpolant_type == 'ous':
             
                 # z_t = a(t)x^{t-1} + b(t)x^t + sigma(t)root(t)noise                                                                                   
                 # bhat(z_t, t, cond) = b(z_t, t, x^{t-1}, x^j, (t-1)-j)
@@ -553,7 +544,7 @@ class Trainer:
                 zt = zref
                 for tscalar in tgrid:
                     t_arr = tscalar * ones
-                    f = self.vector_field_regressor(zt, t_arr, zref, zcond, gap)
+                    f = self.model(zt, t_arr, zref, zcond, gap)
                     g = self.wide(self.interpolant.sigma(t_arr))
                     zt_mean = zt + f * dt
                     diffusion_term = g * torch.randn_like(zt_mean) * torch.sqrt(dt)
@@ -570,51 +561,53 @@ class Trainer:
         if n == 1:
             Z_series = Z_series[:, 1:]
 
-        ae_ours = self.config["autoencoder"]["type"] == "ours"
+        ae_ours = (self.args.vqvae_type == 'river')
         dec_fn = self.ae.backbone.decode_from_latents if ae_ours else self.ae.decode
-
         # Decode to image space
         Z_series = rearrange(Z_series, "b n c h w -> (b n) c h w")
         X_series = dec_fn(Z_series)
         X_series = rearrange(X_series, "(b n) c h w -> b n c h w", b=b)
         return X_series
 
-
-
 def set_args_from_river_repo(args):
-    args.task = 'kth'
-    args.input_size = 64
-    args.crop_size = 64
-    args.frames_per_sample = 40
-    args.num_observations = 40
-    args.condition_frames = 10
-    args.frames_to_generation = 30
-    args.skip_frames = 0
-    args.random_horizontal_flip = False
-    args.aug = False
-    args.albumentations = True
-    args.K = 10
-    args.num_sampling_conditioning_frames = 10
-    args.num_sampling_generation_frames = 30
+    if args.task == 'kth':
+        args.C_data = 3
+        args.H_data = 64
+        args.W_data = 64
+        args.C_latent = 4
+        args.H_latent = 8
+        args.W_latent = 8
+        args.input_size = 64
+        args.crop_size = 64
+        args.frames_per_sample = 40
+        args.num_observations = 40
+        args.condition_frames = 10
+        args.frames_to_generation = 30
+        args.num_sampling_conditioning_frames = 10
+        args.num_sampling_generation_frames = 30
+        args.vqvae_type = "ldm-vq" # or river for custom.
+        args.vqvae_config = "f8_small"
+    else:
+        assert False
     return args
 
-
 if __name__ == "__main__":
-
     #os.environ['MPLCONFIGDIR'] = '/gpfs/scratch/goldsm20/.matplotcache'
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
     torch.backends.cudnn.benchmark = False 
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
-    #'./local/river_clevrer_128_vqvae.pth'
-    # './local/river_kth_64_vqvae.ckpt'
-    # c['data']['data_root'] = './local/kth_hdf5s/'
-    # ae['ckpt_path'] = './local/river_kth_64_vqvae.ckpt'
-    #args.sample_subdir
-    #interpolant
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data_path', type=str)
-    parser.add_argument("--results_dir", type=str, default="./kth_data/hdf5s/")
+     
+    # paths
+    parser.add_argument('--data_path', type=str, default = "/mnt/home/mgoldstein/ceph/video/kth/data/hdf5s/")
+    parser.add_argument("--results_dir", type=str, default="/mnt/home/mgoldstein/ceph/video/kth/results")
+    parser.add_argument("--load_vqvae_ckpt_path", type=str, default='/mnt/home/mgoldstein/ceph/video/kth/checkpoints/vqvae.pt')
+    parser.add_argument('--load_model_ckpt_path', type=str, default=None) # train from scratch
+    parser.add_argument('--wandb_entity', type = str, default = 'marikgoldstein')
+    parser.add_argument('--wandb_project', type = str, default = 'videointerpolants')
+    parser.add_argument('--interpolant_type', type = str, default = 'linear')
+    parser.add_argument('--task', type = str, default = 'kth')
     parser.add_argument("--epochs", type=int, default=100000)
     parser.add_argument('--limit_train_batches', type = int, default = -1)
     parser.add_argument('--num_training_steps', type = int, default = 400_000)
@@ -628,8 +621,6 @@ if __name__ == "__main__":
     parser.add_argument("--save_every", type=int, default= 25_000)
     parser.add_argument("--save_most_recent_every", type=int, default= 1_000)
     parser.add_argument("--sample_every", type=int, default= 5_000)
-    parser.add_argument('--process_name', type=str, choices = ['linear','ours'])
-    parser.add_argument("--load_ckpt_path", type=str, default=None)
     parser.add_argument('--overfit', type = int, default = 0)
     parser.add_argument('--num_classes', type = int, default = 1000)
     parser.add_argument('--time_min_sample', type = float, default = 1e-4)
@@ -643,11 +634,6 @@ if __name__ == "__main__":
     parser.add_argument('--lr_schedule', type = str, default = 'constant') # with warmup
     parser.add_argument('--wd', type = float, default = 0)
     parser.add_argument('--num_sampling_steps', type = int, default = 100)
-    parser.add_argument('--interpolant_noise_strength' ,type = float, default = 0.1)
-    # The architecture of the autoencoder [ours, ldm-vq, ldm-kl]
-    #type: "ldm-vq"
-    #config: "f8_small"
-    #ckpt_path: 'ckpts_pretrained/river_kth_64_vqvae.ckpt' ####### MG #######
     args = parser.parse_args()
     args = set_args_from_river_repo(args)
     args.overfit = bool(args.overfit)

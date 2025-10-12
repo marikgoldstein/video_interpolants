@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import math
 import torch
+import torch.nn as nn
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader

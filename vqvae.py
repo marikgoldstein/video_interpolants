@@ -8,6 +8,7 @@ import torch.nn as nn
 from einops import rearrange
 from utils import TensorFolder
 
+import taming
 
 def conv3x3(in_planes: int, out_planes: int, stride: int = 1):
     """3x3 convolution with padding"""
@@ -336,7 +337,7 @@ class Decoder(nn.Module):
 class VQVAE(nn.Module):
     def __init__(self, args):
         super(VQVAE, self).__init__()
-	self.args = args
+        self.args = args
         self.encoder = Encoder(
             in_channels = args.vqgan_encoder_in_channels,
             out_channels = args.vqgan_encoder_out_channels,
@@ -414,10 +415,21 @@ class VQVAE(nn.Module):
         return reconstructed_images
 
 
-def build_vqvae(args, convert_to_sequence=False):
-    backbone = VQVAE(args)
-    if convert_to_sequence:
-        return utils.SequenceConverter(backbone)
-    else:
-        return backbone
+def build_vqvae(args):
 
+    
+    if args.vqvae_type == 'river':
+        backbone = VQVAE(args)
+        vae = utils.SequenceConverter(backbone)
+    else:
+
+        if args.vqvae_config == 'f8':
+            cfg = taming.vq_f8_ddconfig
+        elif args.vqvae_config == 'f8_small':
+            cfg = taming.vq_f8_small_ddconfig
+        else:
+            cfg = taming.vq_f16_ddconfig
+
+        vae = taming.VQModelInterface(cfg, args.load_vqvae_ckpt_path)
+
+    return vae
