@@ -223,43 +223,13 @@ def make_observations_grid(
 
 
 @torch.no_grad()
-def to_video(x: torch.Tensor) -> np.array:
+def uncenter_video(x: torch.Tensor) -> np.array:
     return (((torch.clamp(x, -1., 1.) + 1.) / 2.).detach().cpu().numpy() * 255).astype(np.uint8)
 
 
 @torch.no_grad()
 def to_image(x: torch.Tensor) -> torch.Tensor:
     return (((torch.clamp(x, -1., 1.) + 1.) / 2.) * 255).to(torch.uint8)
-                                                                                                                                                                                                                                              
-def mg_log_media(D, logger, split):                                                                                                                                                                                
-
-    assert split in ['Training','Validation']
-
-    xreal, xcond, xhat = D['xreal'], D['xcond'], D['xhat']
-    
-    wandb_vid = lambda x: logger.wandb().Video(x, fps = 1)
-    assert xreal.shape[0] == xcond.shape[0]
-    assert xhat.shape[0] == xcond.shape[0]
-    num_seq = xreal.shape[0]
-
-    # Log images grid
-    grid = make_observations_grid([xcond, xhat], num_sequences = num_seq)
-    logger.log(f"{split}/Media/reconstructed_observations", logger.wandb().Image(grid))
-
-    # Log real videos
-    real_videos = to_video(xreal)
-    logger.log(f"{split}/Media/real_videos", wandb_vid(real_videos))
-
-    # Log generated videos
-    generated_videos = to_video(xhat)
-    logger.log(f"{split}/Media/generated_videos", wandb_vid(generated_videos))
-
-    # both
-    lst = [xreal[0],  xreal[1], xhat[0], xhat[1]]
-    both_videos = torch.stack(lst, dim=0)
-    both_videos = to_video(both_videos)
-    logger.log(f"{split}/Media/real_vs_generated", wandb_vid(both_videos))
-
 
 def copy_into_A_from_B(A, B):                                                                                                                                                                                                                 
     for k in B:

@@ -203,31 +203,28 @@ class VectorFieldRegressor(nn.Module):
 
     def forward(self, xt, t, ref, cond, gap):
         """
-
         :param input_latents: [b, c, h, w]
         :param reference_latents: [b, c, h, w]
         :param conditioning_latents: [b, c, h, w]
-        :param index_distances: [b]
+        :param gap: index_distances: [b]
         :param timestamps: [b]
         :return: [b, c, h, w]
         """
-        pos_enc = self.position_encoding
-        p_in = self.project_in
-        p_out = self.project_out 
-        gap_embedder = self.time_projection
+        
 
-
-
-
-        # Fetch timestamp tokens
+        # Fetch timestamp tokens. now t is (bsz, feats)
         t = timestamp_embedding(t, dim=self.inner_dim)[:, None] # was unsqueeze 1
 
+
+        # add a feature dim
+        gap = gap[:, None]
+
         # Calculate position embedding
-        pos = pos_enc(xt)
+        pos = self.position_encoding(xt)
         pos = rearrange(pos, "b c h w -> b (h w) c")
 
         # Calculate distance embeddings
-        gap_embedding = gap_embedder(torch.log(gap))[:, None]
+        gap_embedding = self.time_projection(gap.log())[:, None]
 
         # Build input tokens
         if self.reference:
@@ -235,7 +232,7 @@ class VectorFieldRegressor(nn.Module):
         else:
             x = torch.cat([xt, cond], dim = 1)
 
-        x = p_in(x)
+        x = self.project_in(x)
         x = x + pos + gap_embedding
         x = torch.cat([t, x], dim=1)
 
@@ -249,6 +246,6 @@ class VectorFieldRegressor(nn.Module):
             x = b[1](b[0](torch.cat([hs[-i - 1], x], dim=-1)))
 
         # Project to output
-        out = p_out(x[:, 1:])
+        out = self.project_out(x[:, 1:])
 
         return out

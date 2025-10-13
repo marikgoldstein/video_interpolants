@@ -23,7 +23,7 @@ import argparse
 import logging
 import wandb
 from einops import rearrange, repeat                                                                                              
-
+from torchdiffeq import odeint
 
 # local stuff
 import interpolants
@@ -291,7 +291,7 @@ class Trainer:
     def randint(self, low, high, sz):
         return torch.randint(low = low, high = high, size = [sz])
 
-    def get(self, x, idx):
+    def batched_get_index(self, x, idx):
         return x[torch.arange(x.shape[0]), idx]
 
     def wide(self, x):
@@ -301,17 +301,17 @@ class Trainer:
         bsz, num_obs, C, H, W = x.shape
         assert num_obs > 2
         data_idx = self.randint(2, num_obs, bsz)
-        data = self.get(x, data_idx)
+        data = self.batched_get_index(x, data_idx)
         ref_idx = data_idx - 1
-        ref = self.get(x, ref_idx)
+        ref = self.batched_get_index(x, ref_idx)
         cond_idx = torch.cat(
             [self.randint(0, s-1, 1) for s in data_idx], dim = 0
         )
-        cond = self.get(x, cond_idx)
+        cond = self.batched_get_index(x, cond_idx)
         assert torch.all(ref_idx > cond_idx)
         for tensor in [data, cond, ref]:
             assert tensor.shape == (bsz, C, H, W)
-        gap = (ref_idx - cond_idx).type_as(data)[:, None]
+        gap = (ref_idx - cond_idx).type_as(data)
         images = torch.stack([data, ref, cond], dim = 1)
         return images, gap
 
@@ -351,20 +351,23 @@ class Trainer:
 
         # e.g. for kth, num_obs is 40, so this gets first 40 frames
         # in case the video is longer
+        # do this before putting on device to save mem.
         x = x[: , : self.args.num_observations]
         self.model.train()
         x = x.to(self.device)
         loss = self.loss_fn(x)
         self.opt.zero_grad()
         loss.backward()
+        
+        # just some book keeping and EMA updates
         loss_item = loss.detach().item()
         log_dict = {'train_loss': loss_item}
         log_dict['grad_norm'] = self.clip_grads(self.model.parameters())
         self.opt.step()
         log_dict['lr'] = self.update_lr()
         utils.update_ema(self.ema, self.model.module)
-        #sample_dict = self.do_sampling(x, y)
-        #utils.copy_into_A_from_B(A=log_dict, B=sample_dict)
+        sample_dict = self.do_sampling(x)
+        utils.copy_into_A_from_B(A=log_dict, B=sample_dict)
         if self.time_to_log() and self.is_main():
             wandb.log(log_dict,step=self.train_steps)
         if self.time_to_print():
@@ -390,12 +393,33 @@ class Trainer:
         # the kth dataset uses one from Taming Transformers
         # the clevrer dataset uses one written by RIVER repo
         # they have slightly different interfaces
+        # could hide some of this in vae class to clean up this script
         if self.args.vqvae_type == 'river':
             Z = self.vae(x).latents
         else:
             flat_Z = self.vae.encode(self.flatten(x))
             Z = self.unflatten(flat_Z, n = x.shape[1])
         return Z
+
+    @torch.no_grad() 
+    def vae_decode(self, Z):
+
+        b, n, c, h, w = Z.shape
+
+        if self.args.vqvae_type == 'river':
+            dec_fn = self.vae.backbone.decode_from_latents
+        else:
+            dec_fn = self.vae.decode
+
+        # Decode to image space
+        # could hide some of this in the decoder method itself
+        # to clean up this script.
+        Z = rearrange(Z, "b n c h w -> (b n) c h w")
+        X = dec_fn(Z)
+        X = rearrange(X, "(b n) c h w -> b n c h w", b=b)
+        return X
+
+
 
     def sample_time(self, bsz):
         t = torch.distributions.Uniform(
@@ -465,76 +489,101 @@ class Trainer:
             if self.rank == 0:
                 self._checkpoint(mode = mode)
             dist.barrier()
-
+ 
     @torch.no_grad()
-    def do_sampling(self, x, y):    
-        assert False
+    def do_sampling(self, x):   
         if self.time_to_sample():
             self.logger.info("Generating samples...")
-            bsz, new_num_obs = x.shape[0]
-            new_num_obs = x.shape[1]
-            new_bsz = min(4, bsz)
-            num_cond_frames = self.args.condition_frames
-            frames2gen = self.args.frames_to_generate
-            assert num_cond_frames + frames2gen == new_num_obs
-            xreal = x[ : new_bsz, : num_cond_frames + frames2gen]
-            xcond = xreal[ : , : num_cond_frames]
-            xhat = dmodel.sample(X_series = xcond, num_frames = frames2gen) # TODO
-            assert xhat.shape == xreal.shape
-            D = {'xhat': xhat, 'xreal': xreal, 'xcond': xcond}
-            mg_log_media(D, logger, 'Training') # TODO 
-            return D
+            batch_size = x.shape[0]
+            num_frames = x.shape[1]
+            # only plot 4 videos at a time on 
+            # Wandb so that they display in large size
+            batch_size = min(4, batch_size)
+            num_cond = self.args.condition_frames
+            num_gen = self.args.frames_to_generate
+            assert num_cond + num_gen == num_frames
+            x_real = x[ : batch_size, : (num_cond + num_gen)]
+            x_cond = x_real[:, : num_cond]
+            x_hat = self.sample(x_cond, num_gen)
+            assert x_hat.shape == x_real.shape
+             
+            to_wandb_vid = lambda x: wandb.Video(utils.uncenter_video(x), fps = 1)
+            split = 'train'
+            # Log images grid
+            grid = utils.make_observations_grid([x_cond, x_hat], num_sequences = x_real.shape[0])
+ 
+            # two real and two generated, side by side
+            lst = [x_real[0],  x_real[1], x_hat[0], x_hat[1]]
+            both_videos = torch.stack(lst, dim=0)
+
+            D = {
+                f"{split}/Media/reconstructed_observations":wandb.Image(grid),
+                f"{split}/Media/real_videos": wandb_vid(x_real),
+                f"{split}/Media/generated_videos":  wandb_vid(x_hat),
+                f"{split}/Media/real_vs_generated": wandb_vid(both_videos)
+            }
         else:
-            return {}
+            D = {}
+
+        return D
 
     
     @torch.no_grad()
-    def sample(self, X_series, num_frames):
-        assert False
-        Z_series = self.encode(X_series)
+    def sample(self, x_cond, num_gen):
+        '''
+        sample loop to generate num_gen frames
+        '''
+        Z = self.vae_encode(x_cond)
 
-        # batch, num frames, num channels, height width
-        b, n, c, h, w = Z_series.shape
-        if n == 1:
-            Z_series = Z_series[:, [0, 0]]
+        # (batch size, num frames, num channels, H, W)
+        b, original_n, c, h, w = Z.shape
 
-        def get_random_cond(Z_series):
-            
-            high = Z_series.size(1) - 1
+        if original_n == 1:
+            # duplicate the prev frame. there is no extra reference frame to condition on
+            # but remember to remove at the end!!!
+            Z = Z[:, [0,0]]
+            n = Z.shape[1]
+            assert n == 2
+        else:
+            n = original_n
+
+        def get_random_cond(z):
+            high = z.shape[1] - 1
             i = torch.randint(low = 0, high = high, size = [b])
-            cond = self.get(Z_series, i)
-            gap = (high - i).type_as(Z_series)[:, None]
+            cond = self.batched_get_index(z, i)
+            gap = (high - i).type_as(z)
             return cond, gap
 
         print("GENERATING FRAMES")
         # Generate future latents
-        tmin = self.args.time_min_sample
-        tmax = self.args.time_max_sample
+        t_min = self.args.time_min_sample
+        t_max = self.args.time_max_sample
         steps = self.args.num_sampling_steps
-        tgrid = torch.linspace(tmin, tmax, steps).to(Z_series.device)
-        ones = torch.ones(b).to(Z_series.device)
-        
-    
-        for k in range(num_frames):
+        t_grid = torch.linspace(t_min, t_max, steps).type_as(Z)
+        ones = torch.ones(b,).type_as(Z)
+  
+        for k in range(num_gen):
              
             if k % 5 == 0:
-                print(f"generating frame {k} out of {num_frames}")
+                print(f"generating frame {k} out of {num_gen}")
         
-            # every frame, need to get next zcond and zref
-            zcond, gap = get_random_cond(Z_series)
-            
-            zref = Z_series[:, -1]
-    
-            assert zref.shape == (b, self.args.C_latent, self.args.H_latent, self.args.W_latent)
-            assert zcond.shape == (b, self.args.C_latent, self.args.H_latent, self.args.W_latent)
+            # every frame, need to get next zcond and z_ref
+            z_cond, gap = get_random_cond(Z)
+
+            z_ref = Z[:, -1]
+   
+            # z_cond and z_ref are (batch, C_latent, H_latent, W_latent)
+
             if self.args.interpolant_type == 'linear':
-                # ODE step
+            
+                # for linear, the model is trained for the ODE velocity.
                 def f(t, zt):
                     t_arr = t * ones
-                    return self.model(zt, t_arr, zref, zcond, gap)
-                z0 = torch.randn([b, c, h ,w]).to(Z_series.device)
-                z1 = odeint(f, z0, tgrid, method='euler')[-1]
- 
+                    return self.model(zt, t_arr, z_ref, z_cond, gap)
+                z0 = torch.randn_like(z_ref)
+                # get last timestep of integration
+                z1 = odeint(f, z0, t_grid, method='euler')[-1] 
+               
             elif self.args.interpolant_type == 'ous':
             
                 # z_t = a(t)x^{t-1} + b(t)x^t + sigma(t)root(t)noise                                                                                   
@@ -544,35 +593,45 @@ class Trainer:
 
                 # dZ^t_s = bhat(Z^t_s, t, Z^{t-1}, Z^{j}, (t-1)-j) ds + sigma(s)dW_s
 
-                init_condition = zref
                 dt = tgrid[1] - tgrid[0]
-                zt = zref
+                zt = z_ref
                 for tscalar in tgrid:
+                    
+                    # Euler-Maruyama integration
+
                     t_arr = tscalar * ones
-                    f = self.model(zt, t_arr, zref, zcond, gap)
+
+                    # sde drift
+                    f = self.model(zt, t_arr, z_ref, z_cond, gap)
+
+                    # sde diffusion coef
                     g = self.wide(self.interpolant.sigma(t_arr))
+
                     zt_mean = zt + f * dt
+                    
                     diffusion_term = g * torch.randn_like(zt_mean) * torch.sqrt(dt)
+                    
                     zt = zt_mean + diffusion_term
+
+                # don't add diffusion term on the last step
+                # common trick for EM integration in deep generative models
                 z1 = zt_mean
 
             else:
-
                 assert False
 
+            # add a time dim for concat
             Z_next = z1[:, None, ...]
-            Z_series = torch.cat([Z_series, Z_next], dim = 1)
+            
+            # append and now continue to generate the next frame
+            Z = torch.cat([Z, Z_next], dim=1)
+            
 
-        if n == 1:
-            Z_series = Z_series[:, 1:]
+        if original_n == 1:
+            Z = Z[:, 1:] # remove duplicated frame
 
-        ae_ours = (self.args.vqvae_type == 'river')
-        dec_fn = self.vae.backbone.decode_from_latents if ae_ours else self.vae.decode
-        # Decode to image space
-        Z_series = rearrange(Z_series, "b n c h w -> (b n) c h w")
-        X_series = dec_fn(Z_series)
-        X_series = rearrange(X_series, "(b n) c h w -> b n c h w", b=b)
-        return X_series
+        X = self.vae_decode(Z)
+        return X
 
 if __name__ == "__main__":
     
