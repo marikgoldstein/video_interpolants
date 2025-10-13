@@ -34,8 +34,11 @@ class OurInterpolant:
     def compute_xt(self, t, x0, x1, noise):
         return self.wide(self.alpha(t)) * x0 + self.wide(self.beta(t)) * x1 + self.wide(self.gamma(t)) * noise
 
-    def compute_xdot(self, t, x0, x1, noise):
-        return self.wide(self.alpha_dot(t)) * x0 + self.wide(self.beta_dot(t)) * x1 * self.wide(self.sigma_dot(t) * t.sqrt()) * noise
+    def compute_drift_target(self, t, x0, x1, noise):
+        a = self.wide(self.alpha_dot(t))
+        b = self.wide(self.beta_dot(t))
+        noise_coef = self.wide(self.sigma_dot(t) * t.sqrt())
+        return a * x0 + b * x1 + noise_coef * noise
 
     def wide(self, t):
         return t[:, None, None, None]

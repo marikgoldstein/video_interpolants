@@ -22,6 +22,8 @@ from time import time
 import argparse
 import logging
 import wandb
+from einops import rearrange, repeat                                                                                              
+
 
 # local stuff
 import interpolants
@@ -30,6 +32,7 @@ from utils import TensorFolder
 import arch
 import vqvae
 import video_dataset
+import configs
 
 class Trainer:
 
@@ -87,17 +90,17 @@ class Trainer:
         assert self.args.global_batch_size % self.world_size == 0, f"Batch size must be divisible by world size."
         self.rank = dist.get_rank()
         self.device = self.rank % torch.cuda.device_count()
-        self.seed = self.args.global_seed * self.world_size + self.rank
-        torch.manual_seed(self.seed)
+        self.local_seed = self.args.global_seed * self.world_size + self.rank
+        torch.manual_seed(self.local_seed)
         torch.cuda.set_device(self.device)
-        print(f"Starting rank={self.rank}, seed={self.seed}, world_size={self.world_size}.")
+        print(f"Starting rank={self.rank}, seed={self.local_seed}, world_size={self.world_size}.")
         self.local_batch_size = int(self.args.global_batch_size // self.world_size)
         print("local batch size is", self.local_batch_size)
 
     def setup_dirs_and_logging(self,):
         if self.rank == 0:
             os.makedirs(self.args.results_dir, exist_ok=True)  
-            experiment_name = f"{self.args.task}-{self.args.interpolant_type}"
+            experiment_name = f"{self.args.dataset}-{self.args.interpolant_type}"
             experiment_dir = f"{self.args.results_dir}/{experiment_name}"  
             self.checkpoint_dir = f"{experiment_dir}/checkpoints"  
             os.makedirs(self.checkpoint_dir, exist_ok=True)
@@ -126,13 +129,14 @@ class Trainer:
         # taming vae does ckpt load automatically. todo handle custom river vae too.
         self.vae = vqvae.build_vqvae(self.args)
         self.vae.eval()
+        self.vae.to(self.device)
         self.model = arch.VectorFieldRegressor(
             state_size = self.args.model_state_size,
             state_res = self.args.model_state_res,
             inner_dim = self.args.model_inner_dim,
             depth = self.args.model_depth,
             mid_depth = self.args.model_mid_depth,
-            out_norm = self.args.model.out_norm,
+            out_norm = self.args.model_out_norm,
         )
         self.ema = deepcopy(self.model).to(self.device)  
         self.ema.eval()  
@@ -145,7 +149,7 @@ class Trainer:
             weight_decay=self.args.weight_decay
         )
         self.maybe_load()
-        self.logger.info(f"SiT Parameters: {sum(p.numel() for p in self.model.parameters()):,}")
+        self.logger.info(f"Parameters: {sum(p.numel() for p in self.model.parameters()):,}")
 
     def get_video_datasets(self, split):
         return video_dataset.VideoDataset(
@@ -159,12 +163,6 @@ class Trainer:
             albumentations=self.args.data_albumentations,
         )
 
-
-            self.data_aug = False
-                        self.data_random_horizontal_flip = False
-                                    self.data_albumentations = True
-
-
     def setup_data(self,):
         self.datasets = {}
         self.datasets['train'] = self.get_video_datasets(split = 'train')
@@ -173,7 +171,7 @@ class Trainer:
             self.datasets["train"],
             replacement=True,
             num_samples=(self.local_batch_size * self.args.num_training_steps),
-            generator=torch.Generator().manual_seed(self.seed)
+            generator=torch.Generator().manual_seed(self.local_seed)
         )
         self.train_dataloader = DataLoader(
             dataset=self.datasets['train'],
@@ -213,17 +211,12 @@ class Trainer:
     
     def training_loop(self,):
         self.checkpoint(mode = 'init')
-        self.logger.info(f"Training for {args.epochs} epochs...")
         # get 2nd batch, dont like first one 
         self.x_overfit = next(iter(self.train_dataloader))
         # TODO
         #self.plot_real_data()
-        for epoch_num in range(self.args.epochs):
-            if self.train_steps >= self.args.num_training_steps:
-                self.logger.info("Done. Breaking out of loop over epochs")
-                break
-            self.do_epoch(epoch_num)
-        self.model.eval()
+        while self.train_steps < self.args.num_training_steps:
+            self.do_epoch()
         self.checkpoint(mode = 'final')
         self.logger.info("Done!")
         utils.ddp_cleanup()
@@ -243,20 +236,14 @@ class Trainer:
         return done
 
         
-    def do_epoch(self, epoch_num):
-
-        self.sampler.set_epoch(epoch_num)
-        self.logger.info(f"Beginning epoch {epoch_num}...")
-
-        for batch_num, (x, y) in enumerate(self.train_dataloader):
-
+    def do_epoch(self):
+        # set_epoch() not needed for sampler since each rank
+        # uses its own generator with local seed
+        for batch_num, x in enumerate(self.train_dataloader):
             if self.done_with_epoch(batch_num):
                 break
-            
-            self.do_step(batch_num, x, y)
-            
-        self.logger.info(f"Done with epoch:{epoch_num}")
-   
+            self.do_step(batch_num, x)
+
     def clip_grads(self, x):
         return torch.nn.utils.clip_grad_norm_(x, self.args.grad_clip_norm).item()
     
@@ -332,16 +319,20 @@ class Trainer:
         images, gap = self.get_data_cond_ref(x)
         Z = self.vae_encode(images)
         z1, zref, zcond = Z[:,0], Z[:, 1], Z[:, 2]
-        t = self.sample_time(bsz).type_as(z1)
+        t = self.sample_time(Z.shape[0]).type_as(z1)
         if self.args.interpolant_type == 'linear':
             z0 = torch.randn_like(z1)
             zt = self.interpolant.compute_xt(x0=z0,x1=z1,t=t)
-            zt_dot = self.interpolant.compute_xdot(x0=z0,x1=z1,t=t) 
+            velocity_target = self.interpolant.compute_xdot(x0=z0,x1=z1,t=t) 
+            target = velocity_target
         elif slef.args.interpolant_type == 'ours':
             z0 = zref
             noise = torch.randn_like(z1)
             zt = self.interpolant.compute_xt(x0=z0,x1=z1,t=t, noise = noise)
-            zt_dot = self.interpolant.compute_xdot(x0=z0,x1=z1,t=t, noise = noise) 
+            drift_target = self.interpolant.compute_drift_target(x0=z0,x1=z1,t=t, noise = noise) 
+            target = drift_target
+        else:
+            assert False
         return zt, t, zref, zcond, gap, target
 
     def loss_fn(self, x):
@@ -349,18 +340,18 @@ class Trainer:
         num_obs = x.size(1)
         bsz, num_obs, C, H, W = x.shape
         zt, t, zref, zcond, gap, target = self.prepare_batch(x)
-        vtheta = self.model(zt, t, zref, zcond, gap)
-        assert vtheta.shape == zt_dot.shape
-        loss = (vtheta - target).pow(2).sum(dim=[1,2,3]).mean()
+        model_out = self.model(zt, t, zref, zcond, gap)
+        assert model_out.shape == target.shape
+        loss = (model_out - target).pow(2).sum(dim=[1,2,3]).mean()
         return loss
 
-
-
-
-    def do_step(self, batch_num, x, y):
+    def do_step(self, batch_num, x):
         if self.args.overfit:
             x = self.x_overfit
-        x = batch[: , : self.args.num_observations]
+
+        # e.g. for kth, num_obs is 40, so this gets first 40 frames
+        # in case the video is longer
+        x = x[: , : self.args.num_observations]
         self.model.train()
         x = x.to(self.device)
         loss = self.loss_fn(x)
@@ -400,11 +391,10 @@ class Trainer:
         # the clevrer dataset uses one written by RIVER repo
         # they have slightly different interfaces
         if self.args.vqvae_type == 'river':
-            Z = self.vae(xall).latents
+            Z = self.vae(x).latents
         else:
-            flat_xall = self.flatten(xall)
-            flat_Z = self.vae.encode(flat_xall)
-            Z = self.unflatten(flat_Z, n = xall.shape[1])
+            flat_Z = self.vae.encode(self.flatten(x))
+            Z = self.unflatten(flat_Z, n = x.shape[1])
         return Z
 
     def sample_time(self, bsz):
@@ -415,7 +405,7 @@ class Trainer:
         return t
 
     def update_lr(self,):
-        new_lr = get_lr(
+        new_lr = utils.get_lr(
             update_step=self.train_steps, 
             base_lr = self.args.base_lr, 
             min_lr = self.args.min_lr, 
@@ -429,6 +419,8 @@ class Trainer:
         return new_lr
 
     def get_checkpoint_dict(self,):
+        self.model.eval()
+        self.ema.eval()
         return {
             "model": self.model.module.state_dict(),
             "ema": self.ema.state_dict(),
@@ -598,7 +590,6 @@ if __name__ == "__main__":
     parser.add_argument('--dataset', type = str, choices = ['kth', 'clevrer'], default = 'kth')
     parser.add_argument('--overfit', type = int, default = 0)
     args = parser.parse_args()
-    args = set_args_from_river_repo(args)
     args.overfit = bool(args.overfit)
     config = configs.Config(
         dataset = args.dataset,

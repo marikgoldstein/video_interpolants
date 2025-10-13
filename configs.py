@@ -4,8 +4,14 @@ class Config:
 
     def __init__(self, dataset, overfit, interpolant_type, load_model_ckpt_path, wandb_entity, wandb_project):
 
+        
         self.dataset = dataset
         self.overfit = overfit
+        self.interpolant_type = interpolant_type
+        self.load_model_ckpt_path = load_model_ckpt_path
+        self.wandb_entity = wandb_entity
+        self.wandb_project = wandb_project
+
         REAL = not overfit
 
         if self.dataset == 'kth':
@@ -17,10 +23,6 @@ class Config:
 
         self.results_dir = "/mnt/home/mgoldstein/ceph/video/results/kth"
 
-        self.load_model_ckpt_path = load_model_ckpt_path
-
-        self.wandb_entity = wandb_entity
-        self.wandb_project = wandb_project
 
         self.epochs = 1000000000  # use num_training_steps instead
         self.limit_train_batches = -1 # per epoch. <0 means not in use. Useful for debugging epoch loops.
@@ -47,7 +49,7 @@ class Config:
         self.base_lr = 2e-4
         self.min_lr = 1e-6
         self.lr_warmup_steps = 10_000
-        self.lr_shedule = 'constant' # with warmup
+        self.lr_schedule = 'constant' # with warmup
         self.grad_clip_norm = 1.0
         self.weight_decay = 0.0
 
@@ -62,7 +64,7 @@ class Config:
             self.C_latent = 4
             self.H_latent = 8
             self.W_latent = 8
-            slef.input_size = 64
+            self.input_size = 64
             self.crop_size = 64
             self.num_observations = 40
             self.skip_frames = 0
@@ -79,7 +81,7 @@ class Config:
 
 
             # MAIN MODEL
-	    self.model_state_size = 4
+            self.model_state_size = 4
             self.model_state_res = [8,8]
             self.model_inner_dim = 768
             self.model_depth = 4
@@ -94,7 +96,7 @@ class Config:
             self.C_latent = 4
             self.H_latent = 8
             self.W_latent = 8
-            slef.input_size = 64
+            self.input_size = 64
             self.crop_size = 64
             self.num_observations = 16
             self.skip_frames = 4
@@ -117,7 +119,7 @@ class Config:
             self.load_vqvae_ckpt_path = '/mnt/home/mgoldstein/ceph/video/ckpts/clevrer_vqvae.ckpt'
 
             # MAIN MODEL
-	    self.model_state_size = 4
+            self.model_state_size = 4
             self.model_state_res = [16,16]
             self.model_inner_dim = 768
             self.model_depth = 4
