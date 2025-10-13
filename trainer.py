@@ -34,21 +34,34 @@ import vqvae
 import video_dataset
 import configs
 
+
+
+
+
+
+
+
+
 class Trainer:
 
-    def __init__(self, args):
-        self.args = args
-        self.setup_ddp_and_device()
-        self.setup_dirs_and_logging()
+    def __init__(self, config, rank, device, local_seed, checkpoint_dir, logger, local_batch_size):
+        
+        self.config = config
+        self.rank = rank
+        self.device = device
+        self.local_seed = local_seed
+        self.checkpoint_dir = checkpoint_dir
+        self.logger = logger
+        self.local_batch_size = local_batch_size
         self.setup_model()
         self.setup_data()
         self.train_steps = 0
         self.setup_interpolant()
 
     def setup_interpolant(self,):
-        if self.args.interpolant_type == 'linear':
+        if self.config.interpolant_type == 'linear':
             self.interpolant = interpolants.LinearInterpolant()
-        elif self.args.interpolant_type == 'ours':
+        elif self.config.interpolant_type == 'ours':
             self.interpolant = interpolants.OurInterpolant()
         else:
             assert False
@@ -60,83 +73,49 @@ class Trainer:
         return self.train_steps in [0,1,2,3,4,5,10,20,50]
 
     def time_to_print(self,):
-        A = self.train_steps % self.args.print_every == 0
+        A = self.train_steps % self.config.print_every == 0
         B = self.is_early()
         return A or B
 
     def time_to_sample(self,):
-        return self.train_steps % self.args.sample_every == 0
+        return self.train_steps % self.config.sample_every == 0
 
     def time_to_log(self,):
-        log_every = self.args.log_every
+        log_every = self.config.log_every
         return (self.train_steps % log_every == 0)
 
     def time_to_update_ema(self,):
-        A = self.train_steps >= self.args.update_ema_after
-        B = self.train_steps %  self.args.update_ema_every == 0
+        A = self.train_steps >= self.config.update_ema_after
+        B = self.train_steps %  self.config.update_ema_every == 0
         return (A and B)
 
     def time_to_save(self,):
-        return self.train_steps % self.args.save_every == 0
+        return self.train_steps % self.config.save_every == 0
 
     def time_to_save_most_recent(self,):
-        return self.train_steps % self.args.save_most_recent_every == 0
-
-    def setup_ddp_and_device(self,):
-        assert torch.cuda.is_available(), "Training currently requires at least one GPU."
-        # Setup DDP:
-        dist.init_process_group("nccl")
-        self.world_size = dist.get_world_size()
-        assert self.args.global_batch_size % self.world_size == 0, f"Batch size must be divisible by world size."
-        self.rank = dist.get_rank()
-        self.device = self.rank % torch.cuda.device_count()
-        self.local_seed = self.args.global_seed * self.world_size + self.rank
-        torch.manual_seed(self.local_seed)
-        torch.cuda.set_device(self.device)
-        print(f"Starting rank={self.rank}, seed={self.local_seed}, world_size={self.world_size}.")
-        self.local_batch_size = int(self.args.global_batch_size // self.world_size)
-        print("local batch size is", self.local_batch_size)
-
-    def setup_dirs_and_logging(self,):
-        if self.rank == 0:
-            os.makedirs(self.args.results_dir, exist_ok=True)  
-            experiment_name = f"{self.args.dataset}-{self.args.interpolant_type}"
-            experiment_dir = f"{self.args.results_dir}/{experiment_name}"  
-            self.checkpoint_dir = f"{experiment_dir}/checkpoints"  
-            os.makedirs(self.checkpoint_dir, exist_ok=True)
-            self.logger = utils.create_logger(experiment_dir)
-            self.logger.info(f"Experiment directory created at {experiment_dir}")
-            wandb_dir = os.path.join(experiment_dir, 'wandb')
-            utils.wandb_initialize(
-                self.args, 
-                entity=self.args.wandb_entity, 
-                project_name=self.args.wandb_project, 
-                directory=wandb_dir
-            )
-        else:
-            self.logger = utils.create_logger(None)
+        return self.train_steps % self.config.save_most_recent_every == 0
 
     def maybe_load(self,):
-        if self.args.load_model_ckpt_path is not None:
-            ckpt_path = self.args.load_ckpt_path
+        if self.config.load_model_ckpt_path is not None:
+            ckpt_path = self.config.load_ckpt_path
             state_dict = torch.load(ckpt_path, map_location=lambda storage, loc: storage)
             self.model.load_state_dict(state_dict["model"])
             self.ema.load_state_dict(state_dict["ema"])
             self.opt.load_state_dict(state_dict["opt"])
-            self.args = state_dict["args"]
+            self.config = state_dict["args"]
 
     def setup_model(self,):
         # taming vae does ckpt load automatically. todo handle custom river vae too.
-        self.vae = vqvae.build_vqvae(self.args)
+        self.vae = vqvae.build_vqvae(self.config)
         self.vae.eval()
         self.vae.to(self.device)
         self.model = arch.VectorFieldRegressor(
-            state_size = self.args.model_state_size,
-            state_res = self.args.model_state_res,
-            inner_dim = self.args.model_inner_dim,
-            depth = self.args.model_depth,
-            mid_depth = self.args.model_mid_depth,
-            out_norm = self.args.model_out_norm,
+            state_size = self.config.model_state_size,
+            state_res = self.config.model_state_res,
+            inner_dim = self.config.model_inner_dim,
+            depth = self.config.model_depth,
+            mid_depth = self.config.model_mid_depth,
+            out_norm = self.config.model_out_norm,
         )
         self.ema = deepcopy(self.model).to(self.device)  
         self.ema.eval()  
@@ -145,22 +124,22 @@ class Trainer:
         utils.update_ema(self.ema, self.model.module, decay=0)  
         self.opt = torch.optim.AdamW(
             self.model.parameters(), 
-            lr=self.args.base_lr, 
-            weight_decay=self.args.weight_decay
+            lr=self.config.base_lr, 
+            weight_decay=self.config.weight_decay
         )
         self.maybe_load()
         self.logger.info(f"Parameters: {sum(p.numel() for p in self.model.parameters()):,}")
 
     def get_video_datasets(self, split):
         return video_dataset.VideoDataset(
-            data_path=os.path.join(self.args.data_path, split),
-            input_size=self.args.input_size,
-            crop_size=self.args.crop_size,
-            frames_per_sample=self.args.num_observations,
-            skip_frames=self.args.skip_frames,
-            random_horizontal_flip=self.args.data_random_horizontal_flip,
-            aug=self.args.data_aug,
-            albumentations=self.args.data_albumentations,
+            data_path=os.path.join(self.config.data_path, split),
+            input_size=self.config.input_size,
+            crop_size=self.config.crop_size,
+            frames_per_sample=self.config.num_observations,
+            skip_frames=self.config.skip_frames,
+            random_horizontal_flip=self.config.data_random_horizontal_flip,
+            aug=self.config.data_aug,
+            albumentations=self.config.data_albumentations,
         )
 
     def setup_data(self,):
@@ -170,14 +149,14 @@ class Trainer:
         self.sampler = torch.utils.data.RandomSampler(
             self.datasets["train"],
             replacement=True,
-            num_samples=(self.local_batch_size * self.args.num_training_steps),
+            num_samples=(self.local_batch_size * self.config.num_training_steps),
             generator=torch.Generator().manual_seed(self.local_seed)
         )
         self.train_dataloader = DataLoader(
             dataset=self.datasets['train'],
             batch_size=self.local_batch_size,
             shuffle=False, 
-            num_workers=self.args.num_workers,
+            num_workers=self.config.num_workers,
             sampler=self.sampler,
             pin_memory=True,
             drop_last=True,
@@ -187,7 +166,7 @@ class Trainer:
             dataset=self.datasets['val'],
             batch_size=self.local_batch_size,
             shuffle=False, 
-            num_workers=self.args.num_workers,
+            num_workers=self.config.num_workers,
             sampler=self.sampler,
             pin_memory=True,
             drop_last=True,
@@ -215,7 +194,7 @@ class Trainer:
         self.x_overfit = next(iter(self.train_dataloader))
         # TODO
         #self.plot_real_data()
-        while self.train_steps < self.args.num_training_steps:
+        while self.train_steps < self.config.num_training_steps:
             self.do_epoch()
         self.checkpoint(mode = 'final')
         self.logger.info("Done!")
@@ -225,11 +204,11 @@ class Trainer:
     
         done = False
 
-        if self.args.limit_train_batches > 0: 
-            if batch_num >= self.args.limit_train_batches:
+        if self.config.limit_train_batches > 0: 
+            if batch_num >= self.config.limit_train_batches:
                 done = True
 
-        if self.train_steps >= self.args.num_training_steps:
+        if self.train_steps >= self.config.num_training_steps:
             done = True
             self.logger.info("Done with num training step")
 
@@ -245,7 +224,7 @@ class Trainer:
             self.do_step(batch_num, x)
 
     def clip_grads(self, x):
-        return torch.nn.utils.clip_grad_norm_(x, self.args.grad_clip_norm).item()
+        return torch.nn.utils.clip_grad_norm_(x, self.config.grad_clip_norm).item()
     
     #def get_window(self, x, t, K):
     #    bsz, num_obs, C, H, W = x.shape
@@ -320,7 +299,7 @@ class Trainer:
         Z = self.vae_encode(images)
         z1, zref, zcond = Z[:,0], Z[:, 1], Z[:, 2]
         t = self.sample_time(Z.shape[0]).type_as(z1)
-        if self.args.interpolant_type == 'linear':
+        if self.config.interpolant_type == 'linear':
             z0 = torch.randn_like(z1)
             zt = self.interpolant.compute_xt(x0=z0,x1=z1,t=t)
             velocity_target = self.interpolant.compute_xdot(x0=z0,x1=z1,t=t) 
@@ -346,13 +325,13 @@ class Trainer:
         return loss
 
     def do_step(self, batch_num, x):
-        if self.args.overfit:
+        if self.config.overfit:
             x = self.x_overfit
 
         # e.g. for kth, num_obs is 40, so this gets first 40 frames
         # in case the video is longer
         # do this before putting on device to save mem.
-        x = x[: , : self.args.num_observations]
+        x = x[: , : self.config.num_observations]
         self.model.train()
         x = x.to(self.device)
         loss = self.loss_fn(x)
@@ -385,16 +364,16 @@ class Trainer:
     def vae_encode(self, x):
         assert len(x.shape) == 5
         bsz, frames, C, H, W = x.shape
-        assert C == self.args.C_data
-        assert H == self.args.H_data
-        assert W == self.args.W_data
+        assert C == self.config.C_data
+        assert H == self.config.H_data
+        assert W == self.config.W_data
         self.vae.eval()
         # the repo uses two different classes for vqvaes.
         # the kth dataset uses one from Taming Transformers
         # the clevrer dataset uses one written by RIVER repo
         # they have slightly different interfaces
         # could hide some of this in vae class to clean up this script
-        if self.args.vqvae_type == 'river':
+        if self.config.vqvae_type == 'river':
             Z = self.vae(x).latents
         else:
             flat_Z = self.vae.encode(self.flatten(x))
@@ -406,7 +385,7 @@ class Trainer:
 
         b, n, c, h, w = Z.shape
 
-        if self.args.vqvae_type == 'river':
+        if self.config.vqvae_type == 'river':
             dec_fn = self.vae.backbone.decode_from_latents
         else:
             dec_fn = self.vae.decode
@@ -423,19 +402,19 @@ class Trainer:
 
     def sample_time(self, bsz):
         t = torch.distributions.Uniform(
-            low = self.args.time_min_training, 
-            high = self.args.time_max_training
+            low = self.config.time_min_training, 
+            high = self.config.time_max_training
         ).sample((bsz,))
         return t
 
     def update_lr(self,):
         new_lr = utils.get_lr(
             update_step=self.train_steps, 
-            base_lr = self.args.base_lr, 
-            min_lr = self.args.min_lr, 
-            num_training_steps = self.args.num_training_steps,
-            warmup_steps = self.args.lr_warmup_steps, 
-            schedule=self.args.lr_schedule
+            base_lr = self.config.base_lr, 
+            min_lr = self.config.min_lr, 
+            num_training_steps = self.config.num_training_steps,
+            warmup_steps = self.config.lr_warmup_steps, 
+            schedule=self.config.lr_schedule
         )
 
         for pg in self.opt.param_groups:
@@ -449,7 +428,7 @@ class Trainer:
             "model": self.model.module.state_dict(),
             "ema": self.ema.state_dict(),
             "opt": self.opt.state_dict(),
-            "args": self.args
+            "args": self.config
         }
 
     def save_ckpt_to_file(self, checkpoint, checkpoint_path):
@@ -499,15 +478,13 @@ class Trainer:
             # only plot 4 videos at a time on 
             # Wandb so that they display in large size
             batch_size = min(4, batch_size)
-            num_cond = self.args.condition_frames
-            num_gen = self.args.frames_to_generate
+            num_cond = self.config.condition_frames
+            num_gen = self.config.frames_to_generate
             assert num_cond + num_gen == num_frames
             x_real = x[ : batch_size, : (num_cond + num_gen)]
             x_cond = x_real[:, : num_cond]
             x_hat = self.sample(x_cond, num_gen)
             assert x_hat.shape == x_real.shape
-             
-            to_wandb_vid = lambda x: wandb.Video(utils.uncenter_video(x), fps = 1)
             split = 'train'
             # Log images grid
             grid = utils.make_observations_grid([x_cond, x_hat], num_sequences = x_real.shape[0])
@@ -516,11 +493,12 @@ class Trainer:
             lst = [x_real[0],  x_real[1], x_hat[0], x_hat[1]]
             both_videos = torch.stack(lst, dim=0)
 
+            fps = 3 # frames per second. reduce to 1 to see each video more clearly picture-by-picture
             D = {
                 f"{split}/Media/reconstructed_observations":wandb.Image(grid),
-                f"{split}/Media/real_videos": to_wandb_vid(x_real),
-                f"{split}/Media/generated_videos":  to_wandb_vid(x_hat),
-                f"{split}/Media/real_vs_generated": to_wandb_vid(both_videos)
+                f"{split}/Media/real_videos": utils.to_wandb_vid(x_real, fps=fps),
+                f"{split}/Media/generated_videos":  utils.to_wandb_vid(x_hat, fps=fps),
+                f"{split}/Media/real_vs_generated": utils.to_wandb_vid(both_videos, fps=fps)
             }
         else:
             D = {}
@@ -556,9 +534,9 @@ class Trainer:
 
         print("GENERATING FRAMES")
         # Generate future latents
-        t_min = self.args.time_min_sample
-        t_max = self.args.time_max_sample
-        steps = self.args.num_sampling_steps
+        t_min = self.config.time_min_sample
+        t_max = self.config.time_max_sample
+        steps = self.config.num_sampling_steps
         t_grid = torch.linspace(t_min, t_max, steps).type_as(Z)
         ones = torch.ones(b,).type_as(Z)
   
@@ -574,7 +552,7 @@ class Trainer:
    
             # z_cond and z_ref are (batch, C_latent, H_latent, W_latent)
 
-            if self.args.interpolant_type == 'linear':
+            if self.config.interpolant_type == 'linear':
             
                 # for linear, the model is trained for the ODE velocity.
                 def f(t, zt):
@@ -584,7 +562,7 @@ class Trainer:
                 # get last timestep of integration
                 z1 = odeint(f, z0, t_grid, method='euler')[-1] 
                
-            elif self.args.interpolant_type == 'ous':
+            elif self.config.interpolant_type == 'ous':
             
                 # z_t = a(t)x^{t-1} + b(t)x^t + sigma(t)root(t)noise                                                                                   
                 # bhat(z_t, t, cond) = b(z_t, t, x^{t-1}, x^j, (t-1)-j)
@@ -633,30 +611,3 @@ class Trainer:
         X = self.vae_decode(Z)
         return X
 
-if __name__ == "__main__":
-    
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
-    torch.backends.cudnn.benchmark = False 
-    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
-    parser = argparse.ArgumentParser()
-     
-    # paths
-    parser.add_argument('--load_model_ckpt_path', type=str, default=None) # train from scratch
-    parser.add_argument('--wandb_entity', type = str, default = 'marikgoldstein')
-    parser.add_argument('--wandb_project', type = str, default = 'videointerpolants')
-    parser.add_argument('--interpolant_type', type = str, choices = ['linear','ours'], default = 'linear')
-    parser.add_argument('--dataset', type = str, choices = ['kth', 'clevrer'], default = 'kth')
-    parser.add_argument('--overfit', type = int, default = 0)
-    args = parser.parse_args()
-    args.overfit = bool(args.overfit)
-    config = configs.Config(
-        dataset = args.dataset,
-        overfit = args.overfit,
-        interpolant_type = args.interpolant_type,
-        load_model_ckpt_path = args.load_model_ckpt_path,
-        wandb_entity = args.wandb_entity,
-        wandb_project = args.wandb_project,
-    )
-    trainer = Trainer(config)
-    trainer.training_loop()

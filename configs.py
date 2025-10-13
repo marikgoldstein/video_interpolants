@@ -2,17 +2,18 @@
 
 class Config:
 
-    def __init__(self, dataset, overfit, interpolant_type, load_model_ckpt_path, wandb_entity, wandb_project):
+    def __init__(self, dataset, overfit, smoke_test, interpolant_type, load_model_ckpt_path, wandb_entity, wandb_project):
 
         
         self.dataset = dataset
         self.overfit = overfit
+        self.smoke_test = smoke_test
         self.interpolant_type = interpolant_type
         self.load_model_ckpt_path = load_model_ckpt_path
         self.wandb_entity = wandb_entity
         self.wandb_project = wandb_project
 
-        REAL = not overfit
+        REAL = (not overfit) and (not smoke_test)
 
         if self.dataset == 'kth':
             self.data_path =  "/mnt/home/mgoldstein/ceph/video/data/kth/hdf5s"
@@ -25,21 +26,36 @@ class Config:
 
 
         self.epochs = 1000000000  # use num_training_steps instead
-        self.limit_train_batches = -1 # per epoch. <0 means not in use. Useful for debugging epoch loops.
-        self.num_training_steps = 400_000
-        self.global_batch_size = 256
+
+        if smoke_test:
+            self.limit_train_batches = 3
+            self.num_training_steps = 100
+        else:
+            self.limit_train_batches = -1 # per epoch. <0 means not in use. Useful for debugging epoch loops.
+            self.num_training_steps = 400_000
+
+        self.global_batch_size = 256 if REAL else 32
         self.num_workers = 4
         self.global_seed = 0
         self.update_ema_after = 10_000 # dont average bad early models into EMA weights
         self.update_ema_every = 1 
         
         # logging, ckpt'ing, sampling
-        self.print_every = 100 # to terminal
-        self.log_every = 100 # to wandb        
-        self.save_every = 25_000
-        self.save_most_recent_every = 1000
-        self.sample_every = 5000
-        self.num_sampling_steps = 100
+
+        if smoke_test:
+            self.print_every = 10
+            self.log_every = 10
+            self.save_every = 50
+            self.save_most_recent_every = 50
+            self.sample_every = 50
+            self.num_sampling_steps = 10
+        else:
+            self.print_every = 100 # to terminal
+            self.log_every = 100 # to wandb        
+            self.save_every = 25_000
+            self.save_most_recent_every = 1000
+            self.sample_every = 5000 if REAL else 1000
+            self.num_sampling_steps = 100
 
         self.time_min_sample = 1e-4
         self.time_max_sample = 1 - 1e-4
@@ -48,7 +64,7 @@ class Config:
 
         self.base_lr = 2e-4
         self.min_lr = 1e-6
-        self.lr_warmup_steps = 10_000
+        self.lr_warmup_steps = 10_000 if REAL else 0
         self.lr_schedule = 'constant' # with warmup
         self.grad_clip_norm = 1.0
         self.weight_decay = 0.0

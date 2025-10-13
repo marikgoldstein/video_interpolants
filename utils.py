@@ -34,6 +34,9 @@ from typing import List
 import torch
 
 
+
+
+
 class TensorFolder:
 
     @staticmethod
@@ -226,6 +229,8 @@ def make_observations_grid(
 def uncenter_video(x: torch.Tensor) -> np.array:
     return (((torch.clamp(x, -1., 1.) + 1.) / 2.).detach().cpu().numpy() * 255).astype(np.uint8)
 
+def to_wandb_vid(x, fps=1):
+    return wandb.Video(uncenter_video(x), fps = fps, format='gif')
 
 @torch.no_grad()
 def to_image(x: torch.Tensor) -> torch.Tensor:
