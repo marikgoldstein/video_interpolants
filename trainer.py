@@ -97,21 +97,27 @@ class Trainer:
     def time_to_save_most_recent(self,):
         return self.train_steps % self.config.save_most_recent_every == 0
 
-    def maybe_load(self,):
-        if self.config.load_model_ckpt_path is not None:
-            ckpt_path = self.config.load_model_ckpt_path
-            state_dict = torch.load(ckpt_path, map_location=lambda storage, loc: storage)
+    def maybe_load(self,):  
+        cpth_pth = self.config.load_model_ckpt_path
+        if cpth_pth is not None:
+            state_dict = torch.load(ckpt_path, map_location=lambda storage, loc: storage, weights_only=False)
             self.model.load_state_dict(state_dict["model"])
             self.ema.load_state_dict(state_dict["ema"])
             self.opt.load_state_dict(state_dict["opt"])
-            self.config = state_dict["args"]
+            #self.args = state_dict["args"]
+            print("LOADED")
+            return True
+        else:
+            return False
 
     def setup_model(self,):
         # taming vae does ckpt load automatically. todo handle custom river vae too.
         self.vae = vqvae.build_vqvae(self.config)
         self.vae.eval()
         self.vae.to(self.device)
-        self.model = arch.VectorFieldRegressor(
+        
+        # init model, ema, opt
+	self.model = arch.VectorFieldRegressor(
             state_size = self.config.model_state_size,
             state_res = self.config.model_state_res,
             inner_dim = self.config.model_inner_dim,
@@ -120,18 +126,34 @@ class Trainer:
             out_norm = self.config.model_out_norm,
             check_nans = self.config.check_nans,
         )
-        self.ema = deepcopy(self.model).to(self.device)  
-        self.ema.eval()  
-        utils.requires_grad(self.ema, False)
-        self.model = DDP(self.model.to(self.device), device_ids=[self.rank])
-        utils.update_ema(self.ema, self.model.module, decay=0)  
         self.opt = torch.optim.AdamW(
             self.model.parameters(), 
             lr=self.config.base_lr, 
             weight_decay=self.config.weight_decay
         )
-        self.maybe_load()
+
+        self.ema = deepcopy(self.model).to(self.device)  
+        self.ema.eval()  
+        utils.requires_grad(self.ema, False)
+
+        # maybe resume from ckpt for model, ema, opt
+        self.is_resumed = self.maybe_load()
+
+        # wrapp in DDP
+        self.model = DDP(self.model.to(self.device), device_ids=[self.rank])
+        
+        # Then move all optimizer state tensors to that device
+        for state in self.opt.state.values():
+            for k, v in state.items():
+                if isinstance(v, torch.Tensor):
+                    state[k] = v.to(self.device)
+
+        # sync ema to model if new, but don't overwrite ema if resuming.
+        if not self.is_resumed:
+            utils.update_ema(self.ema, self.model.module, decay=0)
+
         self.logger.info(f"Parameters: {sum(p.numel() for p in self.model.parameters()):,}")
+
 
     def get_video_datasets(self, split):
         return video_dataset.VideoDataset(
@@ -299,7 +321,6 @@ class Trainer:
         if self.config.smoke_test:
             assert torch.all(gap > 0)
         return data_frame, reference_frame, context_frame, gap
-
 
     def prepare_batch(self, x):
         data_frame, reference_frame, context_frame, gap = self.get_random_triplet(x)
