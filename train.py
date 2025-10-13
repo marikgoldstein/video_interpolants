@@ -518,9 +518,9 @@ class Trainer:
 
             D = {
                 f"{split}/Media/reconstructed_observations":wandb.Image(grid),
-                f"{split}/Media/real_videos": wandb_vid(x_real),
-                f"{split}/Media/generated_videos":  wandb_vid(x_hat),
-                f"{split}/Media/real_vs_generated": wandb_vid(both_videos)
+                f"{split}/Media/real_videos": to_wandb_vid(x_real),
+                f"{split}/Media/generated_videos":  to_wandb_vid(x_hat),
+                f"{split}/Media/real_vs_generated": to_wandb_vid(both_videos)
             }
         else:
             D = {}
