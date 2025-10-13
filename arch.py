@@ -142,7 +142,6 @@ class VectorFieldRegressor(nn.Module):
         out_norm = 'ln'
     ):
         super(VectorFieldRegressor, self).__init__()
-        self.reference = True # whether to use the random context frame.
         self.state_size = state_size
         self.state_res = state_res
         self.state_height = self.state_res[0]
@@ -154,7 +153,7 @@ class VectorFieldRegressor(nn.Module):
         self.position_encoding = build_position_encoding(self.inner_dim, position_embedding_name="learned")
         self.project_in = nn.Sequential(
             Rearrange("b c h w -> b (h w) c"),
-            nn.Linear(3 * self.state_size if self.reference else 2 * self.state_size, self.inner_dim)
+            nn.Linear(3 * self.state_size, self.inner_dim)
         )
         self.time_projection = nn.Sequential(
             nn.Linear(1, 256),
@@ -201,7 +200,7 @@ class VectorFieldRegressor(nn.Module):
             raise NotImplementedError
 
 
-    def forward(self, xt, t, ref, cond, gap):
+    def forward(self, z, t, ref, cond, gap):
         """
         :param input_latents: [b, c, h, w]
         :param reference_latents: [b, c, h, w]
@@ -220,18 +219,14 @@ class VectorFieldRegressor(nn.Module):
         gap = gap[:, None]
 
         # Calculate position embedding
-        pos = self.position_encoding(xt)
+        pos = self.position_encoding(z)
         pos = rearrange(pos, "b c h w -> b (h w) c")
 
         # Calculate distance embeddings
         gap_embedding = self.time_projection(gap.log())[:, None]
 
         # Build input tokens
-        if self.reference:
-            x = torch.cat([xt, ref, cond], dim = 1)
-        else:
-            x = torch.cat([xt, cond], dim = 1)
-
+        x = torch.cat([z, ref, cond], dim = 1)
         x = self.project_in(x)
         x = x + pos + gap_embedding
         x = torch.cat([t, x], dim=1)
