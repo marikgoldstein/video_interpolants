@@ -139,9 +139,11 @@ class VectorFieldRegressor(nn.Module):
         inner_dim = 768, 
         depth = 4, 
         mid_depth = 5, 
-        out_norm = 'ln'
+        out_norm = 'ln',
+        check_nans = False,
     ):
         super(VectorFieldRegressor, self).__init__()
+        self.check_nans = check_nans
         self.state_size = state_size
         self.state_res = state_res
         self.state_height = self.state_res[0]
@@ -199,8 +201,17 @@ class VectorFieldRegressor(nn.Module):
         else:
             raise NotImplementedError
 
+    def check_valid(self, x):           
+        if self.check_nans:
+            
+            if torch.any(torch.isnan(x)):
+                print("X IS NAN")
+                assert False
+            if torch.any(torch.isinf(x)):
+                print("X IS INF")
+                assert False
 
-    def forward(self, z, t, ref, cond, gap):
+    def forward(self, z, t, ref, context, gap):
         """
         :param input_latents: [b, c, h, w]
         :param reference_latents: [b, c, h, w]
@@ -209,11 +220,10 @@ class VectorFieldRegressor(nn.Module):
         :param timestamps: [b]
         :return: [b, c, h, w]
         """
-        
-
         # Fetch timestamp tokens. now t is (bsz, feats)
         t = timestamp_embedding(t, dim=self.inner_dim)[:, None] # was unsqueeze 1
 
+        self.check_valid(t)
 
         # add a feature dim
         gap = gap[:, None]
@@ -222,14 +232,20 @@ class VectorFieldRegressor(nn.Module):
         pos = self.position_encoding(z)
         pos = rearrange(pos, "b c h w -> b (h w) c")
 
+        self.check_valid(pos)
+
         # Calculate distance embeddings
         gap_embedding = self.time_projection(gap.log())[:, None]
 
+        self.check_valid(gap_embedding)
+
         # Build input tokens
-        x = torch.cat([z, ref, cond], dim = 1)
+        x = torch.cat([z, ref, context], dim = 1)
         x = self.project_in(x)
         x = x + pos + gap_embedding
         x = torch.cat([t, x], dim=1)
+
+        self.check_valid(x)
 
         # Propagate through the main network
         hs = []
@@ -242,5 +258,7 @@ class VectorFieldRegressor(nn.Module):
 
         # Project to output
         out = self.project_out(x[:, 1:])
+
+        self.check_valid(out)
 
         return out

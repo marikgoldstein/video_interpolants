@@ -49,10 +49,12 @@ if __name__ == "__main__":
     parser.add_argument('--dataset', type = str, choices = ['kth', 'clevrer'], default = 'kth')
     parser.add_argument('--overfit', type = int, default = 0)
     parser.add_argument('--smoke_test', type = int, default = 0)
+    parser.add_argument('--check_nans', type = int, default = 0)
     args = parser.parse_args()
     args.overfit = bool(args.overfit)
     args.smoke_test = bool(args.smoke_test)
-    
+    args.check_nans = bool(args.check_nans)
+
     # overfit mode: trains on one batch over and over. good check to see if sampling produces the batch
     # smoke test mode: even more toy than overfitting. Just runs 100 training steps to make sure the whole training loop runs without crashing
 
@@ -60,6 +62,7 @@ if __name__ == "__main__":
         dataset = args.dataset,
         overfit = args.overfit, 
         smoke_test = args.smoke_test, 
+        check_nans = args.check_nans,
         interpolant_type = args.interpolant_type,
         load_model_ckpt_path = args.load_model_ckpt_path,
         wandb_entity = args.wandb_entity,

@@ -2,7 +2,7 @@
 
 class Config:
 
-    def __init__(self, dataset, overfit, smoke_test, interpolant_type, load_model_ckpt_path, wandb_entity, wandb_project):
+    def __init__(self, dataset, overfit, smoke_test, check_nans, interpolant_type, load_model_ckpt_path, wandb_entity, wandb_project):
 
         
         self.dataset = dataset
@@ -12,6 +12,7 @@ class Config:
         self.load_model_ckpt_path = load_model_ckpt_path
         self.wandb_entity = wandb_entity
         self.wandb_project = wandb_project
+        self.check_nans = check_nans
 
         REAL = (not overfit) and (not smoke_test)
 
@@ -62,7 +63,7 @@ class Config:
         self.time_min_training = 1e-4
         self.time_max_training = 1 - 1e-4
 
-        self.base_lr = 2e-4
+        self.base_lr = 1e-4
         self.min_lr = 1e-6
         self.lr_warmup_steps = 10_000 if REAL else 0
         self.lr_schedule = 'constant' # with warmup
