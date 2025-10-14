@@ -4,6 +4,7 @@ source ../gameflow/.venv/bin/activate
 GPUS=1
 BP_TORCHRUN="torchrun --standalone --nnodes=1 --nproc_per_node=${GPUS}"
 FI_TORCHRUN="python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=${GPUS}"
-cmd="${FI_TORCHRUN} main.py --overfit 1 --smoke_test 0 --check_nans 1"
+CKPT="/mnt/home/mgoldstein/ceph/video/ckpts/kth_model_ours.pt"
+cmd="${FI_TORCHRUN} main.py --overfit 1 --smoke_test 0 --check_nans 1 --interpolant_type ours --load_model_ckpt_path ${CKPT}"
 echo ${cmd}
 eval ${cmd}  

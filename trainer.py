@@ -97,18 +97,55 @@ class Trainer:
     def time_to_save_most_recent(self,):
         return self.train_steps % self.config.save_most_recent_every == 0
 
+
+    def strip_module(self, state):
+
+        is_ddp = False
+        for k in state:
+            if k.startswith("module"):
+                is_ddp = True
+                break
+        if is_ddp:
+            state = {k.replace("module.", ""): v for k, v in state.items()}
+
+
+        state = {
+            k.replace('vector_field_regressor.', ''): v for k, v in state.items()
+        }
+
+
+        state = {k: v for k, v in state.items() if not k.startswith('ae')}
+
+        return state
+
     def maybe_load(self,):  
         ckpt_path = self.config.load_model_ckpt_path
         if ckpt_path is not None:
-            state_dict = torch.load(ckpt_path, map_location='cpu', weights_only=False) #lambda storage, loc: storage, weights_only=False)
-            self.model.load_state_dict(state_dict["model"])
-            self.ema.load_state_dict(state_dict["ema"])
-            self.opt.load_state_dict(state_dict["opt"])
+            state_dict = torch.load(
+                ckpt_path, 
+                map_location='cpu', 
+                weights_only=False
+            )
+            
+            self.model.load_state_dict(self.strip_module(state_dict["model"]))
+
+            if 'ema' in state_dict:
+                self.ema.load_state_dict(state_dict["ema"])
+                ema_restored = True
+            else:
+                ema_restored = False
+
+
+            if 'opt' in state_dict:
+                self.opt.load_state_dict(state_dict["opt"])
+
             #self.args = state_dict["args"]
             print("LOADED")
-            return True
+            model_restored = True
         else:
-            return False
+            model_restored = False
+            ema_restored = False
+        return model_restored, ema_restored
 
     def setup_model(self,):
         # taming vae does ckpt load automatically. todo handle custom river vae too.
@@ -137,7 +174,7 @@ class Trainer:
         utils.requires_grad(self.ema, False)
 
         # maybe resume from ckpt for model, ema, opt
-        self.is_resumed = self.maybe_load()
+        self.is_resumed, self.ema_restored = self.maybe_load()
 
         # wrapp in DDP
         self.model = DDP(self.model.to(self.device), device_ids=[self.rank])
@@ -149,7 +186,7 @@ class Trainer:
                     state[k] = v.to(self.device)
 
         # sync ema to model if new, but don't overwrite ema if resuming.
-        if not self.is_resumed:
+        if not self.ema_restored:
             utils.update_ema(self.ema, self.model.module, decay=0)
 
         self.logger.info(f"Parameters: {sum(p.numel() for p in self.model.parameters()):,}")
@@ -459,7 +496,8 @@ class Trainer:
             min_lr = self.config.min_lr, 
             num_training_steps = self.config.num_training_steps,
             warmup_steps = self.config.lr_warmup_steps, 
-            schedule=self.config.lr_schedule
+            schedule=self.config.lr_schedule,
+            is_resumed = self.is_resumed,
         )
 
         for pg in self.opt.param_groups:
@@ -526,14 +564,16 @@ class Trainer:
         return batch_size, num_cond, num_gen
 
     @torch.no_grad()
-    def sample(self, x):   
+    def sample(self, x, use_ema = False):   
         if self.time_to_sample():
+
+            x = x.clone()[torch.randperm(x.shape[0])]
             self.logger.info("Generating samples...")
             batch_size, num_cond, num_gen = self.get_num_frames_for_sampling(x)
             X_real = x[ : batch_size, : (num_cond + num_gen)]
             # we start generating frames after this prefix
             X_cond = X_real[:, : num_cond] 
-            X_hat = self._sample(X_cond, num_gen)
+            X_hat = self._sample(X_cond, num_gen, use_ema)
             assert X_hat.shape == X_real.shape
             split = 'train'
             # Log images grid
@@ -552,7 +592,16 @@ class Trainer:
             D = {}
         return D
 
-    def sample_frame_ode(self, z0, Z_ref, Z_context, gap, t_grid):
+    def sample_frame_ode(self, z0, Z_ref, Z_context, gap, t_grid, use_ema):
+
+
+        if use_ema:
+            model = self.ema
+        else:
+            model = self.model
+
+        model.eval()
+
         assert self.config.interpolant_type == 'linear'
         ones = torch.ones(z0.shape[0]).type_as(z0)
         # for linear, the model is trained for the ODE velocity.
@@ -565,7 +614,7 @@ class Trainer:
             self.check_valid(Z_context)
             self.check_valid(gap)
 
-            model_out = self.model(z=zt, t=t_arr, ref=Z_ref, context=Z_context, gap=gap)
+            model_out = model(z=zt, t=t_arr, ref=Z_ref, context=Z_context, gap=gap)
             self.check_valid(model_out)
             return model_out
 
@@ -577,7 +626,17 @@ class Trainer:
         return z1
 
 
-    def sample_frame_sde(self, z0, Z_ref, Z_context, gap, t_grid):
+    def sample_frame_sde(self, z0, Z_ref, Z_context, gap, t_grid, use_ema):
+
+        if use_ema:
+            model = self.ema
+        else:
+            model = self.model
+
+        model.eval()
+
+
+
         assert self.config.interpolant_type == 'ours'
         assert len(t_grid) >= 2
         # below, dot means time derivative.
@@ -610,7 +669,7 @@ class Trainer:
             t_arr = tscalar * ones
 
             # sde drift
-            f = self.model(z=zt, t=t_arr, ref=Z_ref, context=Z_context, gap=gap)
+            f = model(z=zt, t=t_arr, ref=Z_ref, context=Z_context, gap=gap)
             self.check_valid(f)
 
             # sde diffusion coef
@@ -636,7 +695,7 @@ class Trainer:
         return z1
 
     @torch.no_grad()
-    def _sample(self, x_cond, num_gen):
+    def _sample(self, x_cond, num_gen, use_ema):
         '''
         sample loop to generate num_gen frames
         '''
@@ -711,11 +770,11 @@ class Trainer:
             #print("[sampling] (context, ref, current)", context_idx, reference_idx, current_idx)
             if self.config.interpolant_type == 'linear':
                 z0 = torch.randn_like(Z_reference)
-                z1 = self.sample_frame_ode(z0, Z_reference, Z_context, gap, t_grid)
+                z1 = self.sample_frame_ode(z0, Z_reference, Z_context, gap, t_grid, use_ema=use_ema)
 
             elif self.config.interpolant_type == 'ours':        
                 z0 = Z_reference
-                z1 = self.sample_frame_sde(z0, Z_reference, Z_context, gap, t_grid)
+                z1 = self.sample_frame_sde(z0, Z_reference, Z_context, gap, t_grid, use_ema=use_ema)
             else:
                 assert False
 

@@ -33,7 +33,7 @@ class Config:
             self.limit_train_batches = -1 # per epoch. <0 means not in use. Useful for debugging epoch loops.
             self.num_training_steps = 400_000
 
-        self.global_batch_size = 256 if REAL else 4
+        self.global_batch_size = 256 if REAL else 32
         self.num_workers = 4
         self.global_seed = 0
         self.update_ema_after = 10_000 # dont average bad early models into EMA weights

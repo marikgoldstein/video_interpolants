@@ -314,7 +314,7 @@ def wandb_initialize(args, entity, project_name, directory):
         dir=directory,
     )
 
-def get_lr(update_step, base_lr, min_lr, num_training_steps, warmup_steps, schedule):
+def get_lr(update_step, base_lr, min_lr, num_training_steps, warmup_steps, schedule, is_resumed):
     
     if schedule == "constant":
         lr_no_warmup = base_lr
@@ -330,10 +330,10 @@ def get_lr(update_step, base_lr, min_lr, num_training_steps, warmup_steps, sched
         assert False
 
     # linear warm‑up -------------------------------------------------------
-    warmup_coef = update_step / warmup_steps if update_step < warmup_steps else 1.0
+    if is_resumed or (warmup_steps < 1):
+        warmup_coef = 1.0
+    else:
+        warmup_coef = update_step / warmup_steps if update_step < warmup_steps else 1.0
     lr = warmup_coef * lr_no_warmup
     return max(lr, min_lr)
-
-
-
 
