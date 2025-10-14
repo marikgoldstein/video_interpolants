@@ -9,7 +9,7 @@ class Config:
  
         self.dataset = dataset
         self.overfit = overfit
-        self.overfit_one = True
+        self.overfit_one = False #True
         self.smoke_test = smoke_test
         self.interpolant_type = interpolant_type
         self.load_model_ckpt_path = load_model_ckpt_path
@@ -57,7 +57,7 @@ class Config:
             self.log_every = 100 # to wandb        
             self.save_every = 25_000
             self.save_most_recent_every = 1000
-            self.sample_every = 5000 if REAL else 1000
+            self.sample_every = 5000 if REAL else 400
             self.num_sampling_steps = 100
 
         self.time_min_sample = 1e-4

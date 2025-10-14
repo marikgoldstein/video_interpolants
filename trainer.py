@@ -698,6 +698,37 @@ class Trainer:
         z1 = zt_mean
         return z1
 
+    def _pick_ref_ctx_gap(self, Z):
+        """
+        Choose reference = last available frame (t-1),
+        context = some j < (t-1),
+        gap = (t-1) - j >= 1
+        """
+        assert Z.ndim == 5  # (b, n, c, h, w)
+        b, n, _, _, _ = Z.shape
+        # need at least 2 frames available (t-1 exists)
+        assert n >= 2, "Need ≥2 frames in Z to pick (ref=t-1, ctx<ref)."
+        device = Z.device
+        dtype_long = torch.long
+
+        # last available index = t-1
+        ref_idx_scalar = n - 1
+
+        # context ∈ {0, 1, ..., (t-1) - 1}  == [0, ref_idx_scalar)
+        # torch.randint: high is exclusive, so this is perfect.
+        ctx_idx = torch.randint(0, ref_idx_scalar, (b,), device=device, dtype=dtype_long)
+
+        ref_idx = torch.full((b,), ref_idx_scalar, device=device, dtype=dtype_long)
+
+        Z_ref = self.batched_get_index(Z, ref_idx)
+        Z_ctx = self.batched_get_index(Z, ctx_idx)
+
+        gap = (ref_idx - ctx_idx)           # shape (b,), dtype long
+        if self.config.smoke_test:
+            assert torch.all(gap >= 1)
+
+        return Z_ref, Z_ctx, gap
+
     @torch.no_grad()
     def _sample(self, x_cond, num_gen, use_ema):
         '''
@@ -744,7 +775,6 @@ class Trainer:
             Z_reference = self.batched_get_index(Z, reference_idx)
             Z_context = self.batched_get_index(Z, context_idx)
             gap = (reference_idx - context_idx).to(Z.device)
-            ''' 
 
             # current_idx is the last available frame index
             current_idx_scalar   = Z.shape[1] - 1
@@ -770,7 +800,10 @@ class Trainer:
 
             if self.config.smoke_test:
                 assert torch.all(gap > 0)
-            
+            '''            
+
+            Z_reference, Z_context, gap = self._pick_ref_ctx_gap(Z)
+
             #print("[sampling] (context, ref, current)", context_idx, reference_idx, current_idx)
             if self.config.interpolant_type == 'linear':
                 z0 = torch.randn_like(Z_reference)
