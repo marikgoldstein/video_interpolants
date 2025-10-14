@@ -8,7 +8,6 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torchvision.datasets import ImageFolder
 from torchvision.utils import make_grid
-import torch.distributed as dist
 from torchvision import transforms
 from PIL import Image
 import os
@@ -19,7 +18,6 @@ from collections import OrderedDict
 from copy import deepcopy
 from glob import glob
 from time import time
-import argparse
 import logging
 import wandb
 from einops import rearrange, repeat                                                                                              
@@ -33,6 +31,7 @@ import arch
 import vqvae
 import video_dataset
 import configs
+import checkpointing
 
 class Trainer:
 
@@ -47,9 +46,11 @@ class Trainer:
         self.local_batch_size = local_batch_size
         self.setup_model()
         self.setup_data()
-        self.train_steps = 0
+        self.update_steps = 0
         self.setup_interpolant()
-
+        self.interpolant = interpolants.get_interpolant(
+            self.config.interpolant_type
+        )
 
     def check_valid(self, x):
         if self.config.check_nans:
@@ -60,92 +61,28 @@ class Trainer:
                 print("X IS INF")
                 assert False
 
-    def setup_interpolant(self,):
-        if self.config.interpolant_type == 'linear':
-            self.interpolant = interpolants.LinearInterpolant()
-        elif self.config.interpolant_type == 'ours':
-            self.interpolant = interpolants.OurInterpolant()
-        else:
-            assert False
-
     def is_main(self,):
         return self.rank == 0
 
     def is_early(self,):
-        return self.train_steps in [0,1,2,3,4,5,10,20,50]
+        return self.update_steps in [0,1,2,3,4,5,10,20,50]
 
     def time_to_print(self,):
-        A = self.train_steps % self.config.print_every == 0
+        A = self.update_steps % self.config.print_every == 0
         B = self.is_early()
         return A or B
 
     def time_to_sample(self,):
-        return self.train_steps % self.config.sample_every == 0
+        return self.update_steps % self.config.sample_every == 0
 
     def time_to_log(self,):
         log_every = self.config.log_every
-        return (self.train_steps % log_every == 0)
+        return (self.update_steps % log_every == 0)
 
     def time_to_update_ema(self,):
-        A = self.train_steps >= self.config.update_ema_after
-        B = self.train_steps %  self.config.update_ema_every == 0
+        A = self.update_steps >= self.config.update_ema_after
+        B = self.update_steps %  self.config.update_ema_every == 0
         return (A and B)
-
-    def time_to_save(self,):
-        return self.train_steps % self.config.save_every == 0
-
-    def time_to_save_most_recent(self,):
-        return self.train_steps % self.config.save_most_recent_every == 0
-
-
-    def strip_module(self, state):
-
-        is_ddp = False
-        for k in state:
-            if k.startswith("module"):
-                is_ddp = True
-                break
-        if is_ddp:
-            state = {k.replace("module.", ""): v for k, v in state.items()}
-
-
-        state = {
-            k.replace('vector_field_regressor.', ''): v for k, v in state.items()
-        }
-
-
-        state = {k: v for k, v in state.items() if not k.startswith('ae')}
-
-        return state
-
-    def maybe_load(self,):  
-        ckpt_path = self.config.load_model_ckpt_path
-        if ckpt_path is not None:
-            state_dict = torch.load(
-                ckpt_path, 
-                map_location='cpu', 
-                weights_only=False
-            )
-            
-            self.model.load_state_dict(self.strip_module(state_dict["model"]))
-
-            if 'ema' in state_dict:
-                self.ema.load_state_dict(state_dict["ema"])
-                ema_restored = True
-            else:
-                ema_restored = False
-
-
-            if 'opt' in state_dict:
-                self.opt.load_state_dict(state_dict["opt"])
-
-            #self.args = state_dict["args"]
-            print("LOADED")
-            model_restored = True
-        else:
-            model_restored = False
-            ema_restored = False
-        return model_restored, ema_restored
 
     def setup_model(self,):
         # taming vae does ckpt load automatically. todo handle custom river vae too.
@@ -173,13 +110,27 @@ class Trainer:
         self.ema.eval()  
         utils.requires_grad(self.ema, False)
 
+
+        # Setup Checkpointer
+        self.checkpointer = checkpointing.Checkpointer(
+            model = self.model,,
+            ema = self.ema,
+            opt = self.opt,
+            config = self.config,
+            rank = self.rank,
+            save_every = self.config.save_every,
+            save_most_recent = self.config.save_most_recent,
+        )
+
         # maybe resume from ckpt for model, ema, opt
-        self.is_resumed, self.ema_restored = self.maybe_load()
+        self.is_resumed, self.ema_restored, self.opt_restored = self.checkpointer.maybe_load(
+            ckpt_path = self.config.load_model_ckpt_path
+        )
 
         # wrapp in DDP
         self.model = DDP(self.model.to(self.device), device_ids=[self.rank])
         
-        # Then move all optimizer state tensors to that device
+        # Just in case, ensure opt state on correct device after potential checkpoint load
         for state in self.opt.state.values():
             for k, v in state.items():
                 if isinstance(v, torch.Tensor):
@@ -208,8 +159,7 @@ class Trainer:
         self.datasets = {}
         self.datasets['train'] = self.get_video_datasets(split = 'train')
         self.datasets['val'] = self.get_video_datasets(split = 'val')
-
-        
+    
         # we use non-DDP Dataloader + per-rank-local-seed-Generator to support 
         # sampling with replacement during training
         # we do this because we get random subsets of each datapoint.
@@ -241,25 +191,16 @@ class Trainer:
             drop_last=True,
         )
 
-    def array2grid(self, x):
-        nrow = round(math.sqrt(x.size(0)))
-        x = make_grid(x, nrow=nrow, normalize=True, value_range=(-1,1))
-        x = x.mul(255).add_(0.5).clamp_(0,255).permute(1,2,0).to('cpu', torch.uint8).numpy()
-        return x
-
-    def wandb_arr_to_img(self, arr):
-        return wandb.Image(self.array2grid(arr))
-    
     def training_loop(self,):
-        self.checkpoint(mode = 'init')
+        self.checkpointer.checkpoint(mode = 'init')
         self.x_overfit = next(iter(self.train_dataloader))
         if self.config.overfit_one:
             for i in range(1, self.x_overfit.shape[0]):
                 self.x_overfit[i] = self.x_overfit[0]
 
-        while self.train_steps < self.config.num_training_steps:
+        while self.update_steps < self.config.num_training_steps:
             self.do_epoch()
-        self.checkpoint(mode = 'final')
+        self.checkpointer.checkpoint(mode = 'final')
         self.logger.info("Done!")
         utils.ddp_cleanup()
  
@@ -271,7 +212,7 @@ class Trainer:
             if batch_num >= self.config.limit_train_batches:
                 done = True
 
-        if self.train_steps >= self.config.num_training_steps:
+        if self.update_steps >= self.config.num_training_steps:
             done = True
             self.logger.info("Done with num training step")
 
@@ -284,121 +225,87 @@ class Trainer:
         for batch_num, x in enumerate(self.train_dataloader):
             if self.done_with_epoch(batch_num):
                 break
-            self.do_step(batch_num, x)
+            self.train_step(batch_num, x)
 
     def clip_grads(self, x):
         return torch.nn.utils.clip_grad_norm_(x, self.config.grad_clip_norm).item()
-    
-    #def get_window(self, x, t, K):
-    #    bsz, num_obs, C, H, W = x.shape
-    #    assert C == self.C_data
-    #    assert H == self.H_data
-    #    assert W == self.W_data
-    #    start_indices = t - K
-    #    assert torch.all(start_indices >= 0)
-    #    indices = start_indices[:, None] + torch.arange(K + 1)
-    #    indices = indices.to(x.device)
-    #    out = x[torch.arange(bsz)[:, None], indices]
-    #    assert out.shape == (bsz, K+1, C, H, W)
-    #    prefix = out[:, :-1, ...]
-    #    data = out[:, -1:, ...]  # : after -1 makes sure dim is retained
-    #    assert prefix.shape == (bsz, K, C, H, W)
-    #    assert data.shape == (bsz, 1, C, H, W)
-    #    return prefix, data
-
-    #def get_random_data_and_cond(self, x, K):
-    #    # THIS T IS NOT THE INTERPOLANT T
-    #    # THIS T IS THE DATA INDEX
-    #    bsz, num_obs, C, H, W = x.shape
-    #    assert C == self.C_data
-    #    assert H == self.H_data
-    #    assert W == self.W_data
-    #    assert num_obs >= K + 1
-    #    t = self.randint(K, num_obs, bsz)
-    #    cond, xt = self.get_window(x, t, K)
-    #    return cond, xt
-
-    #@torch.no_grad()
-    #def encode_decode(self, X_series):
-    #    b = X_series.shape[0]
-    #    Z_series = self.encode(X_series)
-    #    ae_ours = self.config["autoencoder"]["type"] == "ours"
-    #    dec_fn = self.vae.backbone.decode_from_latents if ae_ours else self.vae.decode
-    #    # Decode to image space
-    #    Z_series = rearrange(Z_series, "b n c h w -> (b n) c h w")
-    #    X_series = dec_fn(Z_series)
-    #    X_series = rearrange(X_series, "(b n) c h w -> b n c h w", b=b)
-    #    return X_series
-
-    def wide(self, x):
-        return x[:, None, None, None]
-              
-    def randint(self, low, high, sz, device):
-        return torch.randint(low=low, high=high, size=(sz,), device=device)
-
-    #def batched_get_index(self, x, idx):
-    #    return x[torch.arange(x.shape[0]), idx]
 
     def batched_get_index(self, x, idx):
         return x[torch.arange(x.shape[0], device=x.device), idx]
 
-    def get_random_triplet(self, x):
-        """
-        Picks:
-            data_frame = Frame(t)
-            reference_frame = Frame(t-1)
-            context_frame = Frame(j), j < t-1
-        Assumes num_obs >= 3.
-        """
-        bsz, num_obs, C, H, W = x.shape
-        dev = x.device
+    def get_frames_for_training(self, x):
+        '''
+        get the data frame, the previous "reference" frame, and one random "context" frame from the past.
+        '''
+        batch_size, num_frames, C, H, W = x.shape
+        assert num_frames > 2
+       
+        # Frame(t) where t ∈ {2, ..., num_obs-1}
+        data_idx = torch.randint(low=2, high=num_frames, size=(batch_size,), device=self.device)
 
-        # t ∈ {2, ..., num_obs-1}
-        data_idx = torch.randint(low=2, high=num_obs, size=(bsz,), device=dev)
-        reference_idx = data_idx - 1  # ∈ {1, ..., num_obs-2}
+        # Frame(t-1) where (t-1) ∈ {1, ..., num_obs-2}
+        reference_idx = data_idx - 1
 
-        # j ∈ {0, ..., t-2}  (exclusive upper bound t-1)
-        # vectorized: sample u ∈ [0,1), scale by (t-1), floor
-        context_idx = (torch.rand(bsz, device=dev) * (data_idx - 1).float()).floor().long()
-
+        # Frame(j) with j < t-1
+        # option 1:  faster but less readable
+        # why correct: rand() in [0,1), mult by (data_idx-1) gives [0, data_idx-1), then floor and long give {0,1,...data_idx-2}
+        context_idx = (torch.rand(batch_size, device=self.device) * (data_idx - 1).float()).floor().long()
+        # if you want a more readable but slower version, use this and recall that randint is exclusive of its upper bound.
+        #cond_idx = torch.cat(
+        #    [torch.randint(low=0, high=s-1, size=1, device=self.device) for s in data_idx], dim = 0
+        #)
+        
+        # get frames
         data_frame      = self.batched_get_index(x, data_idx)
         reference_frame = self.batched_get_index(x, reference_idx)
         context_frame   = self.batched_get_index(x, context_idx)
-
-        # integer gap ≥ 1
-        gap = (reference_idx - context_idx)            # dtype: long, values in {1,2,...}
-        if self.config.smoke_test:
-            assert torch.all(gap >= 1)
+        
+        # gap ≥ 1
+        gap = (reference_idx - context_idx).type_as(x)
 
         return data_frame, reference_frame, context_frame, gap
 
-
-
     def prepare_batch(self, x):
-        data_frame, reference_frame, context_frame, gap = self.get_random_triplet(x)
-        Z = self.vae_encode(torch.stack([data_frame, reference_frame, context_frame], dim=1))
+        '''
+        - get a frame triplet for training
+        - encode the frames into the latent space
+        - compute the noisy states and interpolant targets: this code either trains the ODE velocity for the linear schedule
+          or the SDE drift for the proposed schedule, though in theory you could also use an SDE with the linear schedule
+        '''
+        data_frame, reference_frame, context_frame, gap = self.get_frames_for_training(x)
+
+        # pack frames to encode all at once instead of with 3 passes of VAE
+        stacked_frames = torch.stack([data_frame, reference_frame, context_frame], dim=1)
+        Z = vqvae.encode(self.vae, stacked_frames, self.config.vqvae_type)
         assert Z.shape[1] == 3
         z1, Z_reference, Z_context = Z[:,0], Z[:, 1], Z[:, 2]
+
+        # get random times
         t = self.sample_time(Z.shape[0]).type_as(z1)
-        # default to velocity target for linear
-        # and drift target for ours.
+                       
+        # get noisy states and loss targets
         if self.config.interpolant_type == 'linear':
+            
             z0 = torch.randn_like(z1)
             zt = self.interpolant.compute_xt(z0=z0,z1=z1,t=t)
             target = self.interpolant.compute_xdot(z0=z0,z1=z1,t=t) 
+        
         elif self.config.interpolant_type == 'ours':
+            
             z0 = Z_reference
             noise = torch.randn_like(z1)
             zt = self.interpolant.compute_xt(z0=z0,z1=z1,t=t, noise = noise)
             target = self.interpolant.compute_drift_target(z0=z0, z1=z1,t=t, noise=noise) 
+        
         else:
             assert False
+        
         return zt, t, Z_reference, Z_context, gap, target
 
     def loss_fn(self, x):
-        bsz = x.size(0)
-        num_obs = x.size(1)
-        bsz, num_obs, C, H, W = x.shape
+        batch_size = x.size(0)
+        num_frames = x.size(1)
+        batch_size, num_frames, C, H, W = x.shape
         zt, t, Z_reference, Z_context, gap, target = self.prepare_batch(x)
         model_out = self.model(z=zt, t=t, ref=Z_reference, context=Z_context, gap=gap)
         self.check_valid(model_out)
@@ -406,10 +313,14 @@ class Trainer:
         loss = (model_out - target).pow(2).sum(dim=[1,2,3]).mean()
         return loss
 
-    def do_step(self, batch_num, x):
+
+    def train_step(self, batch_num, x):
+        '''
+        do a training step
+        '''
         if self.config.overfit:
             x = self.x_overfit
-        # e.g. for kth, num_obs is 40, so this gets first 40 frames
+        # e.g. for kth, num_frame is 40, so this gets first 40 frames
         # in case the video is longer
         # do this before putting on device to save mem.
         x = x[: , : self.config.num_observations]
@@ -429,73 +340,15 @@ class Trainer:
         sample_dict = self.sample(x)
         utils.copy_into_A_from_B(A=log_dict, B=sample_dict)
         if self.time_to_log() and self.is_main():
-            wandb.log(log_dict,step=self.train_steps)
+            wandb.log(log_dict,step=self.update_steps)
         if self.time_to_print():
-            self.logger.info(f"(step={self.train_steps:07d}) Train Loss: {loss_item:.4f}")
-        self.checkpoint()
-        self.train_steps += 1
-
-    def flatten(self, x):
-        return rearrange(x, "b n c h w -> (b n) c h w")
-
-    def unflatten(self, x, n = 3):
-        return rearrange(x, "(b n) c h w -> b n c h w", n=n)
-
-    @torch.no_grad()
-    def vae_encode(self, x):
-        assert len(x.shape) == 5
-        bsz, frames, C, H, W = x.shape
-        assert C == self.config.C_data
-        assert H == self.config.H_data
-        assert W == self.config.W_data
-        self.vae.eval()
-        # the repo uses two different classes for vqvaes.
-        # the kth dataset uses one from Taming Transformers
-        # the clevrer dataset uses one written by RIVER repo
-        # they have slightly different interfaces
-        # could hide some of this in vae class to clean up this script
-        if self.config.vqvae_type == 'river':
-            Z = self.vae(x).latents
-        else:
-            flat_Z = self.vae.encode(self.flatten(x))
-            Z = self.unflatten(flat_Z, n = x.shape[1])
-        return Z
-
-    @torch.no_grad() 
-    def vae_decode(self, Z):
-
-        b, n, c, h, w = Z.shape
-
-        if self.config.vqvae_type == 'river':
-            dec_fn = self.vae.backbone.decode_from_latents
-        else:
-            dec_fn = self.vae.decode
-
-        # Decode to image space
-        # could hide some of this in the decoder method itself
-        # to clean up this script.
-        Z = rearrange(Z, "b n c h w -> (b n) c h w")
-        X = dec_fn(Z)
-        X = rearrange(X, "(b n) c h w -> b n c h w", b=b)
-        return X
-    ''' 
-    def sample_time(self, bsz):
-        t = torch.distributions.Uniform(
-            low = self.config.time_min_training, 
-            high = self.config.time_max_training
-        ).sample((bsz,))
-        return t
-    '''
-
-    def sample_time(self, bsz):
-        tmin = self.config.time_min_training
-        tmax = self.config.time_max_training
-        return torch.rand(bsz, device=self.device, dtype=torch.float32) * (tmax - tmin) + tmin
-
+            self.logger.info(f"(step={self.update_steps:07d}) Train Loss: {loss_item:.4f}")
+        self.checkpointer.checkpoint()
+        self.update_steps += 1
 
     def update_lr(self,):
         new_lr = utils.get_lr(
-            update_step=self.train_steps, 
+            update_step=self.update_steps,
             base_lr = self.config.base_lr, 
             min_lr = self.config.min_lr, 
             num_training_steps = self.config.num_training_steps,
@@ -508,53 +361,6 @@ class Trainer:
             pg["lr"] = new_lr
         return new_lr
 
-    def get_checkpoint_dict(self,):
-        self.model.eval()
-        self.ema.eval()
-        return {
-            "model": self.model.module.state_dict(),
-            "ema": self.ema.state_dict(),
-            "opt": self.opt.state_dict(),
-            "args": self.config
-        }
-
-    def save_ckpt_to_file(self, checkpoint, checkpoint_path):
-        torch.save(checkpoint, checkpoint_path)
-        self.logger.info(f"Saved checkpoint to {checkpoint_path}")
-
-    def _checkpoint(self, mode=None):
-        
-        if mode == 'init':
-            checkpoint = self.get_checkpoint_dict()
-            checkpoint_path = f"{self.checkpoint_dir}/init.pt"
-            self.save_ckpt_to_file(checkpoint, checkpoint_path)
-
-        elif mode == 'final':
-            checkpoint = self.get_checkpoint_dict()
-            checkpoint_path = f"{self.checkpoint_dir}/final.pt"
-            self.save_ckpt_to_file(checkpoint, checkpoint_path)
-        
-        else:
-
-            if self.time_to_save():
-                checkpoint = self.get_checkpoint_dict()
-                checkpoint_path = f"{self.checkpoint_dir}/{self.train_steps:07d}.pt"
-                self.save_ckpt_to_file(checkpoint, checkpoint_path)
-
-            if self.time_to_save_most_recent():
-                checkpoint = self.get_checkpoint_dict()
-                checkpoint_path = f"{self.checkpoint_dir}/latest.pt"
-                self.save_ckpt_to_file(checkpoint, checkpoint_path)
-
-
-    def checkpoint(self, mode=None):
-        A = (mode in ['init', 'final'])
-        B = self.time_to_save()
-        C = self.time_to_save_most_recent()
-        if (A or B or C):
-            if self.rank == 0:
-                self._checkpoint(mode = mode)
-            dist.barrier()
 
     def get_num_frames_for_sampling(self, x):
         batch_size = x.shape[0]
@@ -568,8 +374,16 @@ class Trainer:
         return batch_size, num_cond, num_gen
 
     @torch.no_grad()
-    def sample(self, x, use_ema = False):   
-        if self.time_to_sample():
+    def sample(self, x):
+       
+       if self.time_to_sample():
+
+            ret_dict = {}
+
+            # this split name is just for logging keys.
+            # if you want to sample from held out data, you will
+            # need to pass a different x here.
+            split = 'train'
 
             x = x.clone()[torch.randperm(x.shape[0])]
             self.logger.info("Generating samples...")
@@ -577,24 +391,30 @@ class Trainer:
             X_real = x[ : batch_size, : (num_cond + num_gen)]
             # we start generating frames after this prefix
             X_cond = X_real[:, : num_cond] 
-            X_hat = self._sample(X_cond, num_gen, use_ema)
-            assert X_hat.shape == X_real.shape
-            split = 'train'
-            # Log images grid
-            grid = utils.make_observations_grid([X_cond, X_hat], num_sequences = X_real.shape[0])
-            # two real and two generated, side by side
-            lst = [X_real[0],  X_real[1], X_hat[0], X_hat[1]]
-            both_videos = torch.stack(lst, dim=0)
-            fps = 3 # frames per second. reduce to 1 to see each video more clearly picture-by-picture
-            D = {
-                f"{split}/Media/reconstructed_observations":wandb.Image(grid),
-                f"{split}/Media/real_videos": utils.to_wandb_vid(X_real, fps=fps),
-                f"{split}/Media/generated_videos":  utils.to_wandb_vid(X_hat, fps=fps),
-                f"{split}/Media/real_vs_generated": utils.to_wandb_vid(both_videos, fps=fps)
-            }
+            
+            for use_ema in [False, True]:
+
+                ema_key = 'ema' if use_ema else 'nonema'
+                print(f"Sampling with {ema_key}")
+
+                X_hat = self._sample(X_cond, num_gen, use_ema)
+                # Log images grid
+                grid = utils.make_observations_grid([X_cond, X_hat], num_sequences = X_real.shape[0])
+                # two real and two generated, side by side
+                real_and_fake = torch.stack(
+                    [X_real[0],  X_real[1], X_hat[0], X_hat[1]], dim = 0
+                )
+
+                # if you want to see it picture-by-picture in a long scroll
+                #ret_dict[f"{split}/Media/reconstructed_observations"] = wandb.Image(grid)
+                fps = 3 # frames per second. reduce to 1 to see each video more clearly picture-by-picture
+                ret_dict[f"{split}/Media/real_videos_{ema_key}"] = utils.to_wandb_vid(X_real, fps=fps)
+                ret_dict[f"{split}/Media/generated_videos_{ema_key}"] = utils.to_wandb_vid(X_hat, fps=fps)
+                ret_dict[f"{split}/Media/real_vs_generated_{ema_key}"] = utils.to_wandb_vid(real_and_fake, fps=fps)
+
         else:
-            D = {}
-        return D
+            ret_dict = {}
+        return ret_dict
 
     def sample_frame_ode(self, z0, Z_ref, Z_context, gap, t_grid, use_ema):
 
@@ -677,7 +497,7 @@ class Trainer:
             self.check_valid(f)
 
             # sde diffusion coef
-            g = self.wide(self.interpolant.sigma(t_arr))
+            g = self.interpolant.sigma(t_arr)
             self.check_valid(g)
 
             zt_mean = zt + f * dt
@@ -685,7 +505,7 @@ class Trainer:
             self.check_valid(zt_mean)
 
 
-            diffusion_term = g * torch.randn_like(zt_mean) * sqrt_dt
+            diffusion_term = g[:, None, None, None] * torch.randn_like(zt_mean) * sqrt_dt
             self.check_valid(diffusion_term)
 
             zt = zt_mean + diffusion_term
@@ -698,111 +518,76 @@ class Trainer:
         z1 = zt_mean
         return z1
 
-    def _pick_ref_ctx_gap(self, Z):
+    def get_conditioning_frames_for_sampling(self, Z):
         """
         Choose reference = last available frame (t-1),
         context = some j < (t-1),
         gap = (t-1) - j >= 1
         """
         assert Z.ndim == 5  # (b, n, c, h, w)
-        b, n, _, _, _ = Z.shape
+        b, num_frames, _, _, _ = Z.shape
         # need at least 2 frames available (t-1 exists)
-        assert n >= 2, "Need ≥2 frames in Z to pick (ref=t-1, ctx<ref)."
+        assert num_frames >= 2, "Need ≥2 frames in Z to pick (reference=t-1, context<ref)."
         device = Z.device
         dtype_long = torch.long
 
         # last available index = t-1
-        ref_idx_scalar = n - 1
+        reference_idx_scalar = num_frames - 1
 
-        # context ∈ {0, 1, ..., (t-1) - 1}  == [0, ref_idx_scalar)
-        # torch.randint: high is exclusive, so this is perfect.
-        ctx_idx = torch.randint(0, ref_idx_scalar, (b,), device=device, dtype=dtype_long)
+        # context ∈ {0, 1, ..., (t-1) - 1}  (torch.randint: high is exclusive)
+        # unlike training, here the whole batch has the same reference idx.
+        context_idx = torch.randint(0, reference_idx_scalar, (b,), device=device, dtype=dtype_long)
 
-        ref_idx = torch.full((b,), ref_idx_scalar, device=device, dtype=dtype_long)
+        # turn ref idx into a vector, one for each batch element
+        reference_idx = torch.full((b,), reference_idx_scalar, device=device, dtype=dtype_long)
 
-        Z_ref = self.batched_get_index(Z, ref_idx)
-        Z_ctx = self.batched_get_index(Z, ctx_idx)
+        Z_reference = self.batched_get_index(Z, reference_idx)
+        Z_context = self.batched_get_index(Z, context_idx)
 
-        gap = (ref_idx - ctx_idx)           # shape (b,), dtype long
-        if self.config.smoke_test:
-            assert torch.all(gap >= 1)
+        gap = (reference_idx - context_idx).type_as(Z) # (b,)
 
-        return Z_ref, Z_ctx, gap
+        return Z_reference, Z_context, gap
+
+    def get_time_grid_for_sampling(self,):
+        return torch.linspace(
+            self.config.time_min_sample, 
+            self.config.time_max_sample, 
+            self.config.num_sampling_steps
+        )
 
     @torch.no_grad()
-    def _sample(self, x_cond, num_gen, use_ema):
+    def _sample(self, X_cond, num_gen, use_ema):
         '''
         sample loop to generate num_gen frames
+        X_cond is the whole conditioning history that we will append to
         '''
-        Z = self.vae_encode(x_cond)
+        Z = vqvae.encode(self.vae, X_cond, self.config.vqvae_type)
 
         # (batch size, num frames, num channels, H, W)
         b, original_n, c, h, w = Z.shape
 
+        # If there is only one conditioning frame, duplicate it so that we have
+        # both a reference frame and context frame. But remember to remove it later.
         if original_n == 1:
-            # duplicate the prev frame. there is no extra reference frame to condition on
-            # but remember to remove at the end!!!
             Z = Z[:, [0,0]]
             n = Z.shape[1]
             assert n == 2
         else:
             n = original_n
-
-            
+ 
         print("GENERATING FRAMES")
-        t_grid = torch.linspace(
-            self.config.time_min_sample, 
-            self.config.time_max_sample, 
-            self.config.num_sampling_steps
-        ).type_as(Z)
+        t_grid = self.get_time_grid_for_sampling().type_as(Z)
         ones = torch.ones(b,).type_as(Z)
-
 
         # below, I use lowercase z for the interpolant
         # and uppercase Z for the generated latent frames
         # and uppercase X for the pixel space frames
-  
         for k in range(num_gen):
              
             if k % 5 == 0:
                 print(f"generating frame {k} out of {num_gen}")
-            '''
-            current_idx = Z.shape[1] - 1
-            reference_idx = current_idx - 1
-            context_idx = self.randint(0, current_idx-1, sz=b, device=Z.device) 
-            reference_idx = torch.ones(b,).type_as(context_idx) * reference_idx
-            current_idx = torch.ones(b,).type_as(context_idx) * current_idx
-            Z_reference = self.batched_get_index(Z, reference_idx)
-            Z_context = self.batched_get_index(Z, context_idx)
-            gap = (reference_idx - context_idx).to(Z.device)
 
-            # current_idx is the last available frame index
-            current_idx_scalar   = Z.shape[1] - 1
-            assert current_idx_scalar >= 2, "Assumes there are always at least 3 frames available."
-
-            reference_idx_scalar = current_idx_scalar - 1      # ∈ {1, 2, ...}
-            context_high         = reference_idx_scalar        # exclusive upper bound
-
-            b = Z.shape[0]
-            reference_idx = torch.full((b,), reference_idx_scalar, device=Z.device, dtype=torch.long)
-
-            # j ∈ {0, ..., reference_idx_scalar - 1}
-            context_idx = torch.randint(0, context_high, (b,), device=Z.device, dtype=torch.long)
-
-            Z_reference = self.batched_get_index(Z, reference_idx)
-            Z_context   = self.batched_get_index(Z, context_idx)
-
-            # integer gap ≥ 1
-            gap = (reference_idx - context_idx)                # dtype: long, values in {1,2,...}
-            # if your model wants float later, cast at point-of-use:
-            # gap_float = gap.to(Z.dtype)
-
-
-            if self.config.smoke_test:
-                assert torch.all(gap > 0)
-            '''            
-
-            Z_reference, Z_context, gap = self._pick_ref_ctx_gap(Z)
+            Z_reference, Z_context, gap = self.get_conditioning_frames_for_sampling(Z)
 
             #print("[sampling] (context, ref, current)", context_idx, reference_idx, current_idx)
             if self.config.interpolant_type == 'linear':
@@ -825,6 +610,6 @@ class Trainer:
         if original_n == 1:
             Z = Z[:, 1:] # remove duplicated frame
 
-        X = self.vae_decode(Z)
+        X = vqvae.decode(self.vae, Z, self.config.vqvae_type)
         return X
 

@@ -232,6 +232,16 @@ def uncenter_video(x: torch.Tensor) -> np.array:
 def to_wandb_vid(x, fps=1):
     return wandb.Video(uncenter_video(x), fps = fps, format='gif')
 
+def array2grid(x):
+    nrow = round(math.sqrt(x.size(0)))
+    x = make_grid(x, nrow=nrow, normalize=True, value_range=(-1,1))
+    x = x.mul(255).add_(0.5).clamp_(0,255).permute(1,2,0).to('cpu', torch.uint8).numpy()
+    return x
+
+def wandb_arr_to_img(arr):
+    return wandb.Image(array2grid(arr)) 
+
+
 @torch.no_grad()
 def to_image(x: torch.Tensor) -> torch.Tensor:
     return (((torch.clamp(x, -1., 1.) + 1.) / 2.) * 255).to(torch.uint8)

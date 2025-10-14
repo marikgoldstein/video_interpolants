@@ -1,5 +1,16 @@
 import torch
 
+def get_interpolant(interpolant_type):
+
+    if interpolant_type == 'linear':
+	I = interpolants.LinearInterpolant()
+    elif interpolant_type == 'ours':
+	I = interpolants.OurInterpolant()
+    else:
+	assert False
+
+    return I
+
 class LinearInterpolant:
 
     def __init__(self,):

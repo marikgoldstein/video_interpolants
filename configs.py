@@ -9,7 +9,7 @@ class Config:
  
         self.dataset = dataset
         self.overfit = overfit
-        self.overfit_one = False #True
+        self.overfit_one = True #False #True
         self.smoke_test = smoke_test
         self.interpolant_type = interpolant_type
         self.load_model_ckpt_path = load_model_ckpt_path
