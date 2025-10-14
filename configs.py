@@ -1,11 +1,15 @@
 
 
+# todo?
+# 'lr_sched_gamma': 0.99, 'lr_sched_step_size': 10000, 'num_training_steps': 3000000
+
 class Config:
 
     def __init__(self, dataset, overfit, smoke_test, check_nans, interpolant_type, load_model_ckpt_path, wandb_entity, wandb_project):
  
         self.dataset = dataset
         self.overfit = overfit
+        self.overfit_one = True
         self.smoke_test = smoke_test
         self.interpolant_type = interpolant_type
         self.load_model_ckpt_path = load_model_ckpt_path
@@ -61,7 +65,7 @@ class Config:
         self.time_min_training = 1e-4
         self.time_max_training = 1 - 1e-4
 
-        self.base_lr = 1e-4
+        self.base_lr = 2e-4
         self.min_lr = 1e-6
         self.lr_warmup_steps = 10_000 if REAL else 0
         self.lr_schedule = 'constant' # with warmup

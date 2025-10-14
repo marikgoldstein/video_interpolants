@@ -253,6 +253,10 @@ class Trainer:
     def training_loop(self,):
         self.checkpoint(mode = 'init')
         self.x_overfit = next(iter(self.train_dataloader))
+        if self.config.overfit_one:
+            for i in range(1, self.x_overfit.shape[0]):
+                self.x_overfit[i] = self.x_overfit[0]
+
         while self.train_steps < self.config.num_training_steps:
             self.do_epoch()
         self.checkpoint(mode = 'final')
