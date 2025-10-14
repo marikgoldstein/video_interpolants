@@ -113,13 +113,13 @@ class Trainer:
 
         # Setup Checkpointer
         self.checkpointer = checkpointing.Checkpointer(
-            model = self.model,,
+            model = self.model,
             ema = self.ema,
             opt = self.opt,
             config = self.config,
             rank = self.rank,
             save_every = self.config.save_every,
-            save_most_recent = self.config.save_most_recent,
+            save_most_recent_every = self.config.save_most_recent_every,
         )
 
         # maybe resume from ckpt for model, ema, opt
@@ -376,7 +376,7 @@ class Trainer:
     @torch.no_grad()
     def sample(self, x):
        
-       if self.time_to_sample():
+        if self.time_to_sample():
 
             ret_dict = {}
 
@@ -411,7 +411,6 @@ class Trainer:
                 ret_dict[f"{split}/Media/real_videos_{ema_key}"] = utils.to_wandb_vid(X_real, fps=fps)
                 ret_dict[f"{split}/Media/generated_videos_{ema_key}"] = utils.to_wandb_vid(X_hat, fps=fps)
                 ret_dict[f"{split}/Media/real_vs_generated_{ema_key}"] = utils.to_wandb_vid(real_and_fake, fps=fps)
-
         else:
             ret_dict = {}
         return ret_dict
