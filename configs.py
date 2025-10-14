@@ -3,8 +3,7 @@
 class Config:
 
     def __init__(self, dataset, overfit, smoke_test, check_nans, interpolant_type, load_model_ckpt_path, wandb_entity, wandb_project):
-
-        
+ 
         self.dataset = dataset
         self.overfit = overfit
         self.smoke_test = smoke_test
@@ -24,7 +23,6 @@ class Config:
             assert False
 
         self.results_dir = "/mnt/home/mgoldstein/ceph/video/results/kth"
-
 
         self.epochs = 1000000000  # use num_training_steps instead
 

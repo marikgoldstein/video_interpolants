@@ -98,9 +98,9 @@ class Trainer:
         return self.train_steps % self.config.save_most_recent_every == 0
 
     def maybe_load(self,):  
-        cpth_pth = self.config.load_model_ckpt_path
-        if cpth_pth is not None:
-            state_dict = torch.load(ckpt_path, map_location=lambda storage, loc: storage, weights_only=False)
+        ckpt_path = self.config.load_model_ckpt_path
+        if ckpt_path is not None:
+            state_dict = torch.load(ckpt_path, map_location='cpu', weights_only=False) #lambda storage, loc: storage, weights_only=False)
             self.model.load_state_dict(state_dict["model"])
             self.ema.load_state_dict(state_dict["ema"])
             self.opt.load_state_dict(state_dict["opt"])
@@ -117,7 +117,7 @@ class Trainer:
         self.vae.to(self.device)
         
         # init model, ema, opt
-	self.model = arch.VectorFieldRegressor(
+        self.model = arch.VectorFieldRegressor(
             state_size = self.config.model_state_size,
             state_res = self.config.model_state_res,
             inner_dim = self.config.model_inner_dim,
@@ -302,25 +302,36 @@ class Trainer:
         return x[torch.arange(x.shape[0], device=x.device), idx]
 
     def get_random_triplet(self, x):
-        '''
-        Picks a random frame Frame(t)
-        Get previous "reference" Frame(t-1)
-        Pick random index j < t-1 as the "context"frame
-        '''
-
+        """
+        Picks:
+            data_frame = Frame(t)
+            reference_frame = Frame(t-1)
+            context_frame = Frame(j), j < t-1
+        Assumes num_obs >= 3.
+        """
         bsz, num_obs, C, H, W = x.shape
         dev = x.device
-        data_idx = self.randint(2, num_obs, bsz, device=dev)
-        data_frame = self.batched_get_index(x, data_idx)
-        reference_idx = data_idx - 1
+
+        # t ∈ {2, ..., num_obs-1}
+        data_idx = torch.randint(low=2, high=num_obs, size=(bsz,), device=dev)
+        reference_idx = data_idx - 1  # ∈ {1, ..., num_obs-2}
+
+        # j ∈ {0, ..., t-2}  (exclusive upper bound t-1)
+        # vectorized: sample u ∈ [0,1), scale by (t-1), floor
+        context_idx = (torch.rand(bsz, device=dev) * (data_idx - 1).float()).floor().long()
+
+        data_frame      = self.batched_get_index(x, data_idx)
         reference_frame = self.batched_get_index(x, reference_idx)
-        context_idx = torch.cat([self.randint(0, t.item()-1, 1, device=dev) for t in data_idx], dim=0)
-        assert torch.all(reference_idx > context_idx)
-        context_frame = self.batched_get_index(x, context_idx)
-        gap = (reference_idx - context_idx).to(x.device)
+        context_frame   = self.batched_get_index(x, context_idx)
+
+        # integer gap ≥ 1
+        gap = (reference_idx - context_idx)            # dtype: long, values in {1,2,...}
         if self.config.smoke_test:
-            assert torch.all(gap > 0)
+            assert torch.all(gap >= 1)
+
         return data_frame, reference_frame, context_frame, gap
+
+
 
     def prepare_batch(self, x):
         data_frame, reference_frame, context_frame, gap = self.get_random_triplet(x)
@@ -426,13 +437,20 @@ class Trainer:
         X = dec_fn(Z)
         X = rearrange(X, "(b n) c h w -> b n c h w", b=b)
         return X
-
+    ''' 
     def sample_time(self, bsz):
         t = torch.distributions.Uniform(
             low = self.config.time_min_training, 
             high = self.config.time_max_training
         ).sample((bsz,))
         return t
+    '''
+
+    def sample_time(self, bsz):
+        tmin = self.config.time_min_training
+        tmax = self.config.time_max_training
+        return torch.rand(bsz, device=self.device, dtype=torch.float32) * (tmax - tmin) + tmin
+
 
     def update_lr(self,):
         new_lr = utils.get_lr(
@@ -581,6 +599,9 @@ class Trainer:
         dt = (t_grid[1] - t_grid[0]).item()
         ones = torch.ones(z0.shape[0], device=z0.device, dtype=z0.dtype)
 
+        sqrt_dt = math.sqrt(dt)  # or: torch.tensor(dt, device=z0.device, dtype=z0.dtype).sqrt()
+
+
         zt = Z_ref.clone()
         zt_mean = zt
         for tscalar in t_grid:
@@ -601,7 +622,7 @@ class Trainer:
             self.check_valid(zt_mean)
 
 
-            diffusion_term = g * torch.randn_like(zt_mean) * torch.sqrt(dt)
+            diffusion_term = g * torch.randn_like(zt_mean) * sqrt_dt
             self.check_valid(diffusion_term)
 
             zt = zt_mean + diffusion_term
@@ -651,7 +672,7 @@ class Trainer:
              
             if k % 5 == 0:
                 print(f"generating frame {k} out of {num_gen}")
-        
+            '''
             current_idx = Z.shape[1] - 1
             reference_idx = current_idx - 1
             context_idx = self.randint(0, current_idx-1, sz=b, device=Z.device) 
@@ -660,6 +681,30 @@ class Trainer:
             Z_reference = self.batched_get_index(Z, reference_idx)
             Z_context = self.batched_get_index(Z, context_idx)
             gap = (reference_idx - context_idx).to(Z.device)
+            ''' 
+
+            # current_idx is the last available frame index
+            current_idx_scalar   = Z.shape[1] - 1
+            assert current_idx_scalar >= 2, "Assumes there are always at least 3 frames available."
+
+            reference_idx_scalar = current_idx_scalar - 1      # ∈ {1, 2, ...}
+            context_high         = reference_idx_scalar        # exclusive upper bound
+
+            b = Z.shape[0]
+            reference_idx = torch.full((b,), reference_idx_scalar, device=Z.device, dtype=torch.long)
+
+            # j ∈ {0, ..., reference_idx_scalar - 1}
+            context_idx = torch.randint(0, context_high, (b,), device=Z.device, dtype=torch.long)
+
+            Z_reference = self.batched_get_index(Z, reference_idx)
+            Z_context   = self.batched_get_index(Z, context_idx)
+
+            # integer gap ≥ 1
+            gap = (reference_idx - context_idx)                # dtype: long, values in {1,2,...}
+            # if your model wants float later, cast at point-of-use:
+            # gap_float = gap.to(Z.dtype)
+
+
             if self.config.smoke_test:
                 assert torch.all(gap > 0)
             
