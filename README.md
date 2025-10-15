@@ -2,9 +2,11 @@
 
 This is a repo for conditional (semi-markovian) video modeling using stochastic interpolants, from the paper
 
-[Probabilistic Forecasting with Stochastic Interpolants and Föllmer Processes](https://arxiv.org/abs/2403.13724),
+[Probabilistic Forecasting with Stochastic Interpolants and Föllmer Processes](https://arxiv.org/abs/2403.13724)
 
-maintained by Mark Goldstein (MG) and co-authors.
+Work done by Yifan Chen, Mark Goldstein, Mengjian Hua, Michael S. Albergo, Nicholas M. Boffi, and Eric Vanden-Eijnden.
+
+Repo maintained by Mark Goldstein (MG) and co-authors.
 
 The original task studied here was defined by [RIVER](https://github.com/Araachie/river). RIVER conditionally model sframe T+1 given frame T as well as a randomly chosen frame between 1 and T-1. The generative modeling is done in the latent space of a pre-trained VQVAE. The authors of this work adapted that code to study the choice of interpolant and how it affects results (not so much to study the overall video modeling technique or the VQGANs).
 
