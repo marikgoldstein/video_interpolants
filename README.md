@@ -1,23 +1,23 @@
 # Summary
 
-This is a repo for conditional (semi-markovian) video modeling using generative models (specifically flow matching / stochastic interpolants).
+This is a repo for conditional (semi-markovian) video modeling using stochastic interpolants, from the paper
 
-The original task studied here was defined by [RIVER](https://github.com/Araachie/river). They conditionally model frame T+1 given frame T as well as a randomly chosen frame between 1 and T-1. Moreover, to save compute, the generative modeling is done in the latent space of a pre-trained VQVAE.
+[Probabilistic Forecasting with Stochastic Interpolants and Föllmer Processes](https://arxiv.org/abs/2403.13724),
 
-Mark and collaborators then adapted this code to study the choice of interpolant 
-and how it affects results (not so much to study the overall video modeling technique). We did this in the paper
+maintained by Mark Goldstein and co-authors.
 
-[Probabilistic Forecasting with Stochastic Interpolants and Föllmer Processes](https://arxiv.org/abs/2403.13724).
+The original task studied here was defined by [RIVER](https://github.com/Araachie/river). They conditionally model frame T+1 given frame T as well as a randomly chosen frame between 1 and T-1. Moreover, to save compute, the generative modeling is done in the latent space of a pre-trained VQVAE. The authors of this work adapted that code to study the choice of interpolant and how it affects results (not so much to study the overall video modeling technique or the VQGANs).
 
-The code here has been re-written from the RIVER repo to make something more shareable and with fewer files. As such, certain extra functionality from that repo is missing. This repo focuses on the basics of training a model and sampling from it.
+A few notes:
 
-data: Mark is still working on reproducing the scripts for data modeling. This was made complicated by some of the original data sources dissapearing. 
-Meanwhile, just ask mark for the preprocessed HDF5 shards, which are all that are needed for training/sampling. Mark will update when the original data processing is available.
+- this is a more-readable re-write of the actual project code. MG has verified on some simple overfitting tests (on a datapoint or a batch). But MG will sometime soon re-run full experiments to make sure the re-write was OK. Just reach out if any questions.
 
-vqvae checkpoints: Ask Mark also for the KTH and CLEVRER pre-trained VQVAEs, or [download them from the RIVER repo](https://github.com/Araachie/river?tab=readme-ov-file#pretrained-models). They were not changed for this project.
+- data: We study two datasets for video modeling, [KTH](https://www.csc.kth.se/cvap/actions/) and [CLEVRER](http://clevrer.csail.mit.edu/). The preprocessed HDF5 shards for running the KTH experiments can be found [here on Globus](https://app.globus.org/file-manager/collections/41785d4d-0395-41d7-80d5-c35c46396c95/overview). MG is worked on also uploading the CLEVRER shards and the data pre-processing code. But for now the code can just be run with the shards. MG will also uploaded the raw KTH data because its zip file links seem to have recently broken on the original KTH website!. The CLEVRER links are alive and well so we will likely not upload the raw CLEVRER data though.
 
-Assuming you have the data shards (necessary) and the vqvae checkpoints (necessary), and optionally the model checkpoints from the Follmer Processes paper, 
-the next step is to run the modeling code.
+- checkpoints: we host the [checkpoints here on Globus](https://app.globus.org/file-manager/collections/1b49bb33-ce78-4dd8-bb0d-bc5736d0ce18/overview). The VQVAE checkpoints come from [RIVER](https://github.com/marikgoldstein/video_interpolants?tab=readme-ov-file) 
+(thanks so much to them for open sourcing). The VQVAE checkpoints were not changed at all for this project, but we are just uploading for availability/redundancy. But the flow model checkpoints were trained by us for this project: one for each of two datasets and one for each choice of interpolant ("linear" and "ours").
+
+Assuming you have the data shards (necessary) and the vqvae checkpoints (necessary), and optionally the model checkpoints, the next step is to run the modeling code.
 
 # some dependencies 
 
@@ -31,9 +31,11 @@ the next step is to run the modeling code.
 check out main.py and configs.py. Main.py just exposes a few basic arguments
 - which dataset
 - which interpolant
-- whether or not to do an overfitting/debugging session (use 0 or 1 and they are converted to False or True)
+- whether or not to do an overfitting/debugging session (overfit arg can be "none" for regular experiment, "batch" for overfitting on a batch, or "one" for overfitting on a batch of one repeated datapoint). When overfitting, sampling always uses the overfitting batch for initial frames.
+- whether or not to do a smoke test which sets all settings so that the script finishes quickly (about 100 steps) and you can identify that it loads and finishes without crashing while making sure that sampling, logging, and checkpointing all work. Use the ints 1 or 0 for True or False, and the code will convert it to a bool
 - whether to load the model from a model checkpoint (this is just for the main model, the VQVAE is automatically loaded)
 - wandb entity (username) and project name
+
 
 The configs file then adds on many things. There is a shared section applicable to both datasets, and then separate branches for KTH vs CLEVRER. Make sure to edit
 - the location of the data shards
@@ -42,35 +44,36 @@ The configs file then adds on many things. There is a shared section applicable 
 
 Then, run main.py with appropriate args. This should call train.py and the train loop should start.
 
+Some DDP systems use 
 
-# data processing (WORK IN PROGRESS, IGNORE)
+```
+torchrun --standalone --nnodes=1 --nproc_per_node=${GPUS}
+```
 
-This is made complicated in part by the KTH data website having recently broken links to the data zips. Mark will transfer data
-from compute cluster to some public place and give instructions. The data processing code will be based on a mix of
-- RIVER (https://github.com/Araachie/river). 
-- https://github.com/willi-menapace/PlayableVideoGeneration 
-- https://github.com/edouardelasalles/srvp/. 
+while others use the older
 
-Meanwhile, Mark will just share the preprocessed HDF5 shards for KTH and CLEVRER with anyone that wants to run this code.
+```
+python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=${GPUS}"
+```
+Using whichever works for you, you can run (overfitting on a batch using our interpolant)
+```
+[ddp stuff] main.py --overfit batch --smoke_test 0 --check_nans 0 --interpolant_type ours"
+```
+To load a checkpoint just add on
+```
+--load_model_ckpt_path ${CKPT_PATH}
+```
+And to run a regular experiment set --overfit batch to --overfit none
 
-- once you have kth_data/raw/jogging etc which contains AVIs, do python preprocessing avis_to_pngs.py
-- then split the png dirs into train val test. I put videos d1,d2 in train, d3 in val, and d4 in test for this demo repo.
-- data/
-	- train/
-		- 00000/ <- this is one video
-		- 00001/
-			- 000.png <- these are frames within one video
-			- 001.png
-			- 002.png
-	- val/
-	- test/
-- then do python pngs_to_hdf5_shards.py --out_dir kth_data/hdf5s --data_dir kth_data/processed --image_size 64 --extension png
-- download autoencders and optionally model checkpoints from river repo https://github.com/Araachie/river
+# Acknowledgements
 
---ckpt_fname ckpts/river_kth_64_model.pth 
+This code builds on 
 
-- their evaluation code isn’t great + not all pieces are included. 
+- RIVER (https://github.com/Araachie/river) (for the overall modeling approach, VQVAE checkpoints, dataloading code, and so on)
+- https://github.com/willi-menapace/PlayableVideoGeneration (RIVER used this for data processing)
+- https://github.com/edouardelasalles/srvp/. (RIVER used this for data processing)
 
-# FVD
 
-FVD wasn’t included. I found a separate repo to compute that.  https://github.com/google-research/google-research/blob/20b2520e416edaea8c038bbf54cc1c739c542822/frechet_video_distance/README.md
+
+
+

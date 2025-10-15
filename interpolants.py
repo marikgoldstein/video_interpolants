@@ -3,9 +3,9 @@ import torch
 def get_interpolant(interpolant_type):
 
     if interpolant_type == 'linear':
-        I = interpolants.LinearInterpolant()
+        I = LinearInterpolant()
     elif interpolant_type == 'ours':
-        I = interpolants.OurInterpolant()
+        I = OurInterpolant()
     else:
         assert False
 

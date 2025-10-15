@@ -9,7 +9,6 @@ class Config:
  
         self.dataset = dataset
         self.overfit = overfit
-        self.overfit_one = True #False #True
         self.smoke_test = smoke_test
         self.interpolant_type = interpolant_type
         self.load_model_ckpt_path = load_model_ckpt_path
@@ -17,7 +16,10 @@ class Config:
         self.wandb_project = wandb_project
         self.check_nans = check_nans
 
-        REAL = (not overfit) and (not smoke_test)
+        assert overfit in ['batch','one','none']
+        overfitting = (overfit in ['batch','one'])
+
+        REAL = (not overfitting) and (not smoke_test)
 
         if self.dataset == 'kth':
             self.data_path =  "/mnt/home/mgoldstein/ceph/video/data/kth/hdf5s"
@@ -47,14 +49,14 @@ class Config:
 
         if smoke_test:
             self.print_every = 10
-            self.log_every = 10
+            self.wandb_every = 10
             self.save_every = 50
             self.save_most_recent_every = 50
             self.sample_every = 50
             self.num_sampling_steps = 10
         else:
             self.print_every = 100 # to terminal
-            self.log_every = 100 # to wandb        
+            self.wandb_every = 100 # to wandb        
             self.save_every = 25_000
             self.save_most_recent_every = 1000
             self.sample_every = 5000 if REAL else 400

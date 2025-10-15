@@ -47,11 +47,10 @@ if __name__ == "__main__":
     parser.add_argument('--wandb_project', type = str, default = 'videointerpolants')
     parser.add_argument('--interpolant_type', type = str, choices = ['linear','ours'], default = 'linear')
     parser.add_argument('--dataset', type = str, choices = ['kth', 'clevrer'], default = 'kth')
-    parser.add_argument('--overfit', type = int, default = 0)
+    parser.add_argument('--overfit', type = str, choices = ['none', 'batch', 'one'], default='none')
     parser.add_argument('--smoke_test', type = int, default = 0)
     parser.add_argument('--check_nans', type = int, default = 0)
     args = parser.parse_args()
-    args.overfit = bool(args.overfit)
     args.smoke_test = bool(args.smoke_test)
     args.check_nans = bool(args.check_nans)
 

@@ -47,10 +47,41 @@ class Trainer:
         self.setup_model()
         self.setup_data()
         self.update_steps = 0
-        self.setup_interpolant()
         self.interpolant = interpolants.get_interpolant(
             self.config.interpolant_type
         )
+        self.print_logging_settings()
+        self.print_extra_notes()
+
+    def print_logging_settings(self,):
+        self.logger.info(f"------Experiment monitoring settings --------")
+        self.logger.info(f"Smoke test mode: {self.config.smoke_test} (run everything quickly to make sure script finishes without error)")
+        self.logger.info(f"Overfit mode: {self.config.overfit} (train on a batch or a datapoint and sample just for that batch or that datapoint. none = regular training)")
+        self.logger.info(f"Print every: {self.config.print_every} (will also print steps [0,1,2,3,4,5,10,20,50])")
+        self.logger.info(f"Wandb every: {self.config.wandb_every}")
+        self.logger.info(f"Save separate checkpoint every: {self.config.save_every} [step_xyz.pt]")
+        self.logger.info(f"Save most recent every: {self.config.save_most_recent_every} [latest.pt]")
+        self.logger.info(f"Sample every: {self.config.sample_every}")
+        self.logger.info(f"Update EMA after: {self.config.update_ema_after}")
+        self.logger.info(f"Update EMA every: {self.config.update_ema_every}")
+        self.logger.info(f"Data path: {self.config.data_path}")
+        self.logger.info(f"Checkpoint dir: {self.checkpoint_dir}")
+        self.logger.info(f"Interpolant type: {self.config.interpolant_type}")
+        self.logger.info(f"Model checkpoint loaded: {self.is_resumed}")
+        self.logger.info(f"EMA checkpoint loaded: {self.ema_restored}")
+        self.logger.info(f"Optimizer checkpoint loaded: {self.opt_restored}")
+        self.logger.info(f"VQVAE checkpoint loaded: {self.vae_restored} (should always be true...)") 
+        self.logger.info('----------------------------------------------')
+
+    def print_extra_notes(self,):
+        self.logger.info('-------- NOTES ----------------')
+        self.logger.info('1) The VQVAEs are NOT perfect. If you are evaluting your flow model')
+        self.logger.info('You should compare against the "ground truth" of xhat = Decode(Encode(X))')
+        self.logger.info('Since this is the best thing your flow model could possibly capture (this is all it sees)')
+        self.logger.info('- - - - - - - - - ')
+        self.logger.info('2) MG has recently open sourced this code base and has checked it on small overfitting tests')
+        self.logger.info('MG should still run a full set of experiments to make sure nothing small changed from the historical/messy code base')
+        self.logger.info('-------------------------------')
 
     def check_valid(self, x):
         if self.config.check_nans:
@@ -75,9 +106,9 @@ class Trainer:
     def time_to_sample(self,):
         return self.update_steps % self.config.sample_every == 0
 
-    def time_to_log(self,):
-        log_every = self.config.log_every
-        return (self.update_steps % log_every == 0)
+    def time_to_wandb(self,):
+        wandb_every = self.config.wandb_every
+        return (self.update_steps % wandb_every == 0)
 
     def time_to_update_ema(self,):
         A = self.update_steps >= self.config.update_ema_after
@@ -86,7 +117,7 @@ class Trainer:
 
     def setup_model(self,):
         # taming vae does ckpt load automatically. todo handle custom river vae too.
-        self.vae = vqvae.build_vqvae(self.config)
+        self.vae, self.vae_restored = vqvae.build_vqvae(self.config, logger = self.logger)
         self.vae.eval()
         self.vae.to(self.device)
         
@@ -113,6 +144,8 @@ class Trainer:
 
         # Setup Checkpointer
         self.checkpointer = checkpointing.Checkpointer(
+            checkpoint_dir = self.checkpoint_dir,
+            logger = self.logger,
             model = self.model,
             ema = self.ema,
             opt = self.opt,
@@ -192,15 +225,19 @@ class Trainer:
         )
 
     def training_loop(self,):
-        self.checkpointer.checkpoint(mode = 'init')
+        self.checkpointer.checkpoint(
+            update_steps = self.update_steps, mode = 'init'
+        )
         self.x_overfit = next(iter(self.train_dataloader))
-        if self.config.overfit_one:
+        if self.config.overfit == 'one':
             for i in range(1, self.x_overfit.shape[0]):
                 self.x_overfit[i] = self.x_overfit[0]
 
         while self.update_steps < self.config.num_training_steps:
             self.do_epoch()
-        self.checkpointer.checkpoint(mode = 'final')
+        self.checkpointer.checkpoint(
+            update_steps = self.update_steps, mode = 'final'
+        )
         self.logger.info("Done!")
         utils.ddp_cleanup()
  
@@ -235,7 +272,9 @@ class Trainer:
 
     def get_frames_for_training(self, x):
         '''
-        get the data frame, the previous "reference" frame, and one random "context" frame from the past.
+        get the data frame, 
+        the previous "reference" frame, 
+        and one random "context" frame from the past.
         '''
         batch_size, num_frames, C, H, W = x.shape
         assert num_frames > 2
@@ -269,8 +308,10 @@ class Trainer:
         '''
         - get a frame triplet for training
         - encode the frames into the latent space
-        - compute the noisy states and interpolant targets: this code either trains the ODE velocity for the linear schedule
-          or the SDE drift for the proposed schedule, though in theory you could also use an SDE with the linear schedule
+        - compute the noisy states and interpolant targets: 
+        this code either trains the ODE velocity for the linear schedule
+        or the SDE drift for the proposed schedule, though in theory 
+        you could also use an SDE with the linear schedule
         '''
         data_frame, reference_frame, context_frame, gap = self.get_frames_for_training(x)
 
@@ -281,7 +322,10 @@ class Trainer:
         z1, Z_reference, Z_context = Z[:,0], Z[:, 1], Z[:, 2]
 
         # get random times
-        t = self.sample_time(Z.shape[0]).type_as(z1)
+        t = torch.distributions.Uniform(
+            low = self.config.time_min_training,
+            high = self.config.time_max_training,
+        ).sample((Z.shape[0],)).type_as(z1)
                        
         # get noisy states and loss targets
         if self.config.interpolant_type == 'linear':
@@ -318,7 +362,7 @@ class Trainer:
         '''
         do a training step
         '''
-        if self.config.overfit:
+        if self.config.overfit in ['batch', 'one']:
             x = self.x_overfit
         # e.g. for kth, num_frame is 40, so this gets first 40 frames
         # in case the video is longer
@@ -336,14 +380,17 @@ class Trainer:
         log_dict['grad_norm'] = self.clip_grads(self.model.parameters())
         self.opt.step()
         log_dict['lr'] = self.update_lr()
-        utils.update_ema(self.ema, self.model.module)
+        if self.time_to_update_ema():
+            utils.update_ema(self.ema, self.model.module)
         sample_dict = self.sample(x)
         utils.copy_into_A_from_B(A=log_dict, B=sample_dict)
-        if self.time_to_log() and self.is_main():
+        if self.time_to_wandb() and self.is_main():
             wandb.log(log_dict,step=self.update_steps)
         if self.time_to_print():
             self.logger.info(f"(step={self.update_steps:07d}) Train Loss: {loss_item:.4f}")
-        self.checkpointer.checkpoint()
+        self.checkpointer.checkpoint(
+            update_steps = self.update_steps
+        )
         self.update_steps += 1
 
     def update_lr(self,):
@@ -395,7 +442,7 @@ class Trainer:
             for use_ema in [False, True]:
 
                 ema_key = 'ema' if use_ema else 'nonema'
-                print(f"Sampling with {ema_key}")
+                self.logger.info(f"Sampling with {ema_key}")
 
                 X_hat = self._sample(X_cond, num_gen, use_ema)
                 # Log images grid
@@ -574,7 +621,7 @@ class Trainer:
         else:
             n = original_n
  
-        print("GENERATING FRAMES")
+        self.logger.info("GENERATING FRAMES")
         t_grid = self.get_time_grid_for_sampling().type_as(Z)
         ones = torch.ones(b,).type_as(Z)
 
@@ -584,7 +631,7 @@ class Trainer:
         for k in range(num_gen):
              
             if k % 5 == 0:
-                print(f"generating frame {k} out of {num_gen}")
+                self.logger.info(f"generating frame {k} out of {num_gen}")
 
             Z_reference, Z_context, gap = self.get_conditioning_frames_for_sampling(Z)
 

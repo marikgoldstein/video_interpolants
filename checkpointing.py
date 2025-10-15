@@ -5,7 +5,9 @@ import torch.distributed as dist
 
 class Checkpointer:
 
-    def __init__(self, model, ema, opt, config, rank, save_every, save_most_recent_every):        
+    def __init__(self, checkpoint_dir, model, ema, opt, config, rank, save_every, save_most_recent_every, logger = None):  
+        self.checkpoint_dir = checkpoint_dir
+        self.logger = logger
         self.model = model
         self.ema = ema
         self.opt = opt
@@ -52,7 +54,7 @@ class Checkpointer:
         self.model.eval()
         self.ema.eval()
 
-        is_ddp = True if isinstance(model, DDP) else False
+        is_ddp = True if isinstance(self.model, DDP) else False
 
         return {
             "model": self.model.module.state_dict() if is_ddp else self.model.state_dict(), 
@@ -61,11 +63,16 @@ class Checkpointer:
             "config": self.config
         }
 
+
+    def info(self, msg):
+        if self.logger is not None:
+            self.logger.info(msg)
+
     def save_ckpt_to_file(self, checkpoint, checkpoint_path):
         torch.save(checkpoint, checkpoint_path)
-        self.logger.info(f"Saved checkpoint to {checkpoint_path}")
+        self.info(f"Saved checkpoint to {checkpoint_path}")
 
-    def checkpoint(self, mode=None):
+    def checkpoint(self, update_steps, mode=None):
         A = (mode in ['init', 'final'])
         B = self.time_to_save(update_steps)
         C = self.time_to_save_most_recent(update_steps)
@@ -90,7 +97,7 @@ class Checkpointer:
 
             if self.time_to_save(update_steps):
                 checkpoint = self.get_checkpoint_dict()
-                checkpoint_path = f"{self.checkpoint_dir}/{self.update_steps:07d}.pt"
+                checkpoint_path = f"{self.checkpoint_dir}/{update_steps:07d}.pt"
                 self.save_ckpt_to_file(checkpoint, checkpoint_path)
 
             if self.time_to_save_most_recent(update_steps):
@@ -110,7 +117,7 @@ class Checkpointer:
             model_state = self.strip_ddp_prefix_from_checkpoint(state_dict['model'])
             model_state = self.cleanup_old_checkpoint_names(model_state)
             self.model.load_state_dict(model_state)
-            print("CHECKPOINT LOADED MODEL")
+            self.info("Checkpoint loaded for model params")
             del model_state
             del state_dict['model']
             model_restored = True
@@ -118,26 +125,28 @@ class Checkpointer:
             if 'ema' in state_dict:
                 self.ema.load_state_dict(state_dict["ema"])
                 ema_restored = True
-                print("CHECKPOINT LOADED EMA, MAKE SURE NOT TO CLEAR EMA IN MODEL SETUP, AFTER THIS LOAD.")
+                self.info("Checkpoint loaded for EMA model. NOTE: make sure not to clear EMA in model setup after this load")
                 del state_dict['ema']
             else:
+                self.info("Checkpoint loaded but no EMA state. Will start a new EMA from loaded model.") 
                 ema_restored = False
 
             if 'opt' in state_dict:
                 self.opt.load_state_dict(state_dict["opt"])
                 del state_dict['opt']
-                print("CHECKPOINT LOADED AN OPTIMIZER STATE")
+                self.info("Checkpoint loaded for optimizer state")
                 opt_restored = True
             else:
-                print("CHECKPOINT DID NOT HAVE AN OPTIMIZER STATE")
+                self.info("Checkpoint loaded, but no optimizer state. Starting a new one.")
+                self.info("(if optimization bad, maybe start with smaller LR)")
                 opt_restored = False
-
             
             if 'config' in state_dict:
-                print("CHECKPOINT FOUND OLD CONFIG, BUT NOT STORING IT + NOT OVERWRITING CURRENT CONFIG")
+                self.info("Checkpoint loaded and found old config, but not storing it + not overwriting current config")
+                self.info("feel free to modify Checkpointer code to do something with old config")
                 del state_dict['config']
             else:
-                print("CHECKPOINT DID NOT FIND OLD CONFIG")
+                self.info("Checkpoint loaded, but did not find an old config (not a problem)")
 
         else:
             model_restored = False

@@ -47,12 +47,13 @@ def encode_decode(vae, X, vqvae_type):
     X_hat = decode(vae, Z, vqvae_type)
     return X_hat    
 
-def build_vqvae(args):
+def build_vqvae(args, logger = None):
     
     if args.vqvae_type == 'river':
         backbone = vqvae_river.VQVAE(
-            args, args.load_vqvae_ckpt_path
+            args, args.load_vqvae_ckpt_path, logger = logger,
         )
+        vae_restored = backbone.vae_restored
         vae = utils.SequenceConverter(backbone)
     else:
 
@@ -64,7 +65,8 @@ def build_vqvae(args):
             cfg = vqvae_taming.vq_f16_ddconfig
 
         vae = vqvae_taming.VQModelInterface(
-            cfg, args.load_vqvae_ckpt_path
+            cfg, args.load_vqvae_ckpt_path, logger = logger,
         )
+        vae_restored = vae.vae_restored
 
-    return vae
+    return vae, vae_restored

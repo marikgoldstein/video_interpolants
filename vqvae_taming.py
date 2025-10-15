@@ -553,8 +553,10 @@ class VQModel(nn.Module):
                  image_key="image",
                  remap=None,
                  sane_index_shape=False,  # tell vector quantizer to return indices as bhw
+                 logger = None
                  ):
         super().__init__()
+        self.logger = logger
         self.image_key = image_key
         self.encoder = Encoder(**ddconfig)
         self.decoder = Decoder(**ddconfig)
@@ -564,8 +566,15 @@ class VQModel(nn.Module):
         self.post_quant_conv = torch.nn.Conv2d(ddconfig["embed_dim"], ddconfig["z_channels"], 1)
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys)
-            print("VQVAE LOADED FROM CHECKPOINT")
+            self.info("VQVAE loaded from checkpoint")
+            self.vae_restored = True
+        else:
+            self.vae_restored = False
         self.image_key = image_key
+
+    def info(self, msg):
+        if self.logger is not None:
+            self.logger.info(msg)
 
     def init_from_ckpt(self, path, ignore_keys=list()):
         sd = torch.load(path, weights_only=False, map_location="cpu")["state_dict"]
@@ -576,7 +585,7 @@ class VQModel(nn.Module):
                     print("Deleting key {} from state_dict.".format(k))
                     del sd[k]
         self.load_state_dict(sd, strict=False)
-        print(f"Restored from {path}")
+        self.info(f"Restored from {path}")
 
     def encode(self, x):
         h = self.encoder(x)
@@ -603,7 +612,7 @@ class VQModel(nn.Module):
 class VQModelInterface(VQModel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-
+        
     def encode(self, x):
         h = self.encoder(x)
         h = self.quant_conv(h)

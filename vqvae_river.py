@@ -331,8 +331,9 @@ class Decoder(nn.Module):
 
 
 class VQVAE(nn.Module):
-    def __init__(self, args, ckpt_path=None):
+    def __init__(self, args, ckpt_path=None, logger = None):
         super(VQVAE, self).__init__()
+        self.logger = logger
         self.args = args
         self.encoder = Encoder(
             in_channels = args.vqvae_river_encoder_in_channels,
@@ -350,7 +351,14 @@ class VQVAE(nn.Module):
 
         if ckpt_path is not None:
             self.load_from_ckpt(ckpt_path)
-            print("VQVAE LOADED FROM CHECKPOINT")
+            self.logger.info("VQVAE loaded from checkpoint")
+            self.vae_restored = True
+        else:
+            self.vae_restored = False
+
+    def info(self, msg):
+        if self.logger is not None:
+            self.logger.info(msg)
 
     def load_from_ckpt(self, ckpt_path: str):
         loaded_state = torch.load(
