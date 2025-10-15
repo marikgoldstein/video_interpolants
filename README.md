@@ -53,18 +53,18 @@ Some clusters are setup to use
 
 ```
 GPUS="1"
-torchrun --standalone --nnodes=1 --nproc_per_node=${GPUS}
+TORCHRUN="torchrun --standalone --nnodes=1 --nproc_per_node=${GPUS}"
 ```
 
 while others use the older
 
 ```
-python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=${GPUS}"
+TORCHRUN="python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=${GPUS}"
 ```
 The differences usually only surface between whether the newer version can find the libraries in your virtual env if yoy use one.
 Using whichever torch run command works for you, you can run (overfitting on a batch using our interpolant)
 ```
-[ddp stuff] main.py --overfit batch --smoke_test 0 --check_nans 0 --interpolant_type ours"
+${TORCHRUN} main.py --overfit batch --smoke_test 0 --check_nans 0 --interpolant_type ours
 ```
 To load a checkpoint just add on
 ```
