@@ -44,6 +44,8 @@ The configs file then adds on many things. There is a shared section applicable 
 
 Then, run main.py with appropriate args. This should call train.py and the train loop should start.
 
+For an example, see run.sh. YOu can 
+
 Some DDP systems use 
 
 ```
@@ -63,7 +65,10 @@ To load a checkpoint just add on
 ```
 --load_model_ckpt_path ${CKPT_PATH}
 ```
-And to run a regular experiment set --overfit batch to --overfit none
+
+If using CKPT the ```kth_model_ours.pt``` checkpoint use --interpolant_type ours, and if using the linear checkpoint, use --interpolant_type linear
+
+To run a regular (non-overfitting/debugging) experiment, set --overfit batch to --overfit none
 
 # Acknowledgements
 
@@ -72,8 +77,4 @@ This code builds on
 - RIVER (https://github.com/Araachie/river) (for the overall modeling approach, VQVAE checkpoints, dataloading code, and so on)
 - https://github.com/willi-menapace/PlayableVideoGeneration (RIVER used this for data processing)
 - https://github.com/edouardelasalles/srvp/. (RIVER used this for data processing)
-
-
-
-
 
