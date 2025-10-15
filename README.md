@@ -12,10 +12,10 @@ A few notes:
 
 - this is a more-readable re-write of the actual project code. MG has verified on some simple overfitting tests (on a datapoint or a batch). But MG will soon re-run full experiments to make sure the re-write was OK. Just reach out if any questions to goldstein AT nyu DOT edu or mgoldstein AT flatironstitute DOT org
 
-- data: We study two datasets for video modeling, [KTH](https://www.csc.kth.se/cvap/actions/) and [CLEVRER](http://clevrer.csail.mit.edu/). The preprocessed HDF5 shards for running the KTH experiments can be found [here on Globus](https://app.globus.org/file-manager/collections/41785d4d-0395-41d7-80d5-c35c46396c95/overview). MG is working on also uploading the CLEVRER shards and the data pre-processing code (drafts of preprocessing code in work_in_progress subdir). But for now the code can just be run with the shards. 
+- data: We study two datasets for video modeling, [KTH](https://www.csc.kth.se/cvap/actions/) and [CLEVRER](http://clevrer.csail.mit.edu/). The preprocessed HDF5 shards for running the KTH experiments can be [found here on Globus](https://app.globus.org/file-manager/collections/41785d4d-0395-41d7-80d5-c35c46396c95/overview). MG is working on also uploading the CLEVRER shards and the data pre-processing code (drafts of preprocessing code in work_in_progress subdir). But for now the code can just be run with the shards. 
 MG will also uploaded the raw KTH data because its zip file links seem to have recently broken on the original KTH website! The CLEVRER links are alive and well, so we will likely not upload the large raw CLEVRER data.
 
-- checkpoints: we host the [checkpoints here on Globus](https://app.globus.org/file-manager/collections/1b49bb33-ce78-4dd8-bb0d-bc5736d0ce18/overview). The VQVAE checkpoints come from [RIVER](https://github.com/marikgoldstein/video_interpolants?tab=readme-ov-file) 
+- checkpoints: we host the [checkpoints here on Globus](https://app.globus.org/file-manager/collections/1b49bb33-ce78-4dd8-bb0d-bc5736d0ce18/overview). The VQVAE checkpoints come from [RIVER](https://github.com/Araachie/river?tab=readme-ov-file#pretrained-models) 
 (thanks so much to them for open sourcing). The VQVAE checkpoints were not changed at all for this project, but we are just uploading for availability/redundancy. But the flow model checkpoints were trained by us for this project: one for each of two datasets and one for each choice of interpolant ("linear" and "ours").
 
 Assuming you have the data shards (necessary) and the vqvae checkpoints (necessary), and optionally the model checkpoints, the next step is to run the modeling code.
@@ -83,6 +83,16 @@ If training from scratch:
 
 If loading a checkpoint, you should see samples right at initialization.
 
+
+# Citation
+```
+@article{chen2024probabilistic,
+  title={Probabilistic forecasting with stochastic interpolants and f$\backslash$" ollmer processes},
+  author={Chen, Yifan and Goldstein, Mark and Hua, Mengjian and Albergo, Michael S and Boffi, Nicholas M and Vanden-Eijnden, Eric},
+  journal={arXiv preprint arXiv:2403.13724},
+  year={2024}
+}
+```
 
 # Acknowledgements
 
