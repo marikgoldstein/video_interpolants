@@ -71,9 +71,9 @@ To load a checkpoint just add on
 --load_model_ckpt_path ${CKPT_PATH}
 ```
 
-If using the checkpoint ```kth_model_ours.pt```, use ```--interpolant_type ours```, and if using the linear checkpoint, use ```--interpolant_type linear```
+If using the checkpoint ```kth_model_ours.pt```, use ```--interpolant_type ours```, and if using the ```kth_model_linear.pt``` checkpoint, use ```--interpolant_type linear```
 
-To run a regular (non-overfitting/debugging) experiment, set --overfit batch to --overfit none
+To run a regular (non-overfitting/debugging) experiment, set ```--overfit batch``` to ```--overfit none```
 
 # What you should see
 
