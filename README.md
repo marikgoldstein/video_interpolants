@@ -31,7 +31,7 @@ Assuming you have the data shards (necessary) and the vqvae checkpoints (necessa
 
 # Running the code
 
-Call main.py from a shell script with torchrun (required) and command line args. See run.sh for an example. Main then automatically runs the trainer.
+Call main.py from a shell script with torchrun (required) and command line args. See run.sh for an example. Mai.py launches the trainer, with all training logic defined in trainer.py
 
 In more detail, first see main.py and configs.py. Main.py just exposes a few basic arguments
 - which dataset
@@ -47,9 +47,7 @@ The configs file then adds on many things. There is a shared section applicable 
 - the location of the vqvae checkpoints
 - the location where you would like to save results
 
-Then, run main.py with appropriate args. This should call train.py and the train loop should start.
-
-For an example, see run.sh. YOu can 
+For an example, see run.sh. You can 
 
 Some DDP systems use 
 
