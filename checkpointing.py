@@ -30,7 +30,7 @@ class Checkpointer:
 
         return state
 
-    def cleanup_old_checkpoint_names(state):
+    def cleanup_old_checkpoint_names(self, state):
         # old checkpoints had the velocity model as an attribute of an outer class.
         # now the model is only that inner model.
         state = {

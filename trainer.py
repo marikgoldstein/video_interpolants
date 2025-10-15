@@ -81,6 +81,8 @@ class Trainer:
         self.logger.info('- - - - - - - - - ')
         self.logger.info('2) MG has recently open sourced this code base and has checked it on small overfitting tests')
         self.logger.info('MG should still run a full set of experiments to make sure nothing small changed from the historical/messy code base')
+        self.logger.info(' - - - - - - - - - ')
+        self.logger.info('3) DDP setup in main.py and DDP init in trainer.py assume just one node (i.e. rank = device). Fix in both places if multinode needed')
         self.logger.info('-------------------------------')
 
     def check_valid(self, x):
@@ -251,10 +253,8 @@ class Trainer:
 
         if self.update_steps >= self.config.num_training_steps:
             done = True
-            self.logger.info("Done with num training step")
-
+            self.logger.info(f"Done with {self.config.num_training_steps} steps.")
         return done
-
         
     def do_epoch(self):
         # set_epoch() not needed for sampler since each rank

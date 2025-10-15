@@ -70,6 +70,8 @@ if __name__ == "__main__":
     del args
 
     # SETUP DDP
+    # NOTE THAT THIS IS ONLY WRITTEN FOR ONE NODE so it assumes rank = device.
+    # both here and in the init call to DDP() in the trainer. Fix if neededed.
     assert torch.cuda.is_available(), "Training currently requires at least one GPU."
     dist.init_process_group("nccl")
     world_size = dist.get_world_size()
@@ -81,7 +83,6 @@ if __name__ == "__main__":
     torch.cuda.set_device(device)
     print(f"Starting rank={rank}, seed={local_seed}, world_size={world_size}.")
     local_batch_size = int(config.global_batch_size // world_size)
-    print("local batch size is", local_batch_size)
 
     # SETUP DIRECTORIES, LOGGING, and WANDB
     if rank == 0:

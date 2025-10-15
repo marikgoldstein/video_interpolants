@@ -71,6 +71,19 @@ If using CKPT the ```kth_model_ours.pt``` checkpoint use --interpolant_type ours
 
 To run a regular (non-overfitting/debugging) experiment, set --overfit batch to --overfit none
 
+# What you should see
+
+When monitoring samples on WANDB, check out the real_vs_generated plot. It has 4 movies: two real datapoints in the top row and two generated videos in the bottom row. For KTH, the videos are length 40, where the conditional task is to generate the next 30 after given the first 10. So the top and bottom rows should match in the first 10 frames, and the bottom row shows your generation
+for the remaining 30 frames. You can change the frames per second in the plotting code in the trainer.
+
+If training from scratch:
+- overfitting on one datapoint should work in about 500-1000 steps
+- batch: a few thousand 
+- whole dataset: I think we ran for 250k training steps?
+
+If loading a checkpoint, you should see samples right at initialization.
+
+
 # Acknowledgements
 
 This code builds on 
