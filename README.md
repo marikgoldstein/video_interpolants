@@ -52,6 +52,7 @@ For an example, see run.sh. You can
 Some DDP systems use 
 
 ```
+GPUS="1"
 torchrun --standalone --nnodes=1 --nproc_per_node=${GPUS}
 ```
 
