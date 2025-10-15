@@ -61,8 +61,8 @@ while others use the older
 ```
 TORCHRUN="python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=${GPUS}"
 ```
-The differences usually only surface between whether the newer version can find the libraries in your virtual env if yoy use one.
-Using whichever torch run command works for you, you can run (overfitting on a batch using our interpolant)
+The differences usually only surface between whether the newer version can find the libraries in your virtual env, if you use one.
+Using whichever command works for you, you can run (overfitting on a batch using our interpolant)
 ```
 ${TORCHRUN} main.py --overfit batch --smoke_test 0 --check_nans 0 --interpolant_type ours
 ```
