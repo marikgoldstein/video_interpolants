@@ -1,6 +1,12 @@
+# This file is taken from https://github.com/Araachie/river
+# It is from RIVER: Efficient Video Prediction via Sparsely
+# Conditioned Flow Matching. We thank the authors for open-sourcing their code.
+
+# The file is an interface for VQVAE's from the Taming Transformers project.
+# https://github.com/CompVis/taming-transformers
+
+
 import importlib
-
-
 import math
 import numpy as np
 import torch

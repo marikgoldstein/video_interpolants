@@ -1,3 +1,5 @@
+# Some of this file is taken from https://github.com/Araachie/river
+
 import wandb
 import torch
 from torchvision.utils import make_grid

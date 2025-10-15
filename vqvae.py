@@ -1,3 +1,8 @@
+# This file is taken from https://github.com/Araachie/river
+# It is from RIVER: Efficient Video Prediction via Sparsely
+# Conditioned Flow Matching. We thank the authors for open-sourcing their code.
+
+
 import torch
 import vqvae_river
 import vqvae_taming

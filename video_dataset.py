@@ -1,3 +1,8 @@
+# This file is taken from https://github.com/Araachie/river
+# It is from RIVER: Efficient Video Prediction via Sparsely
+# Conditioned Flow Matching. We thank the authors for open-sourcing their code.
+
+
 import albumentations
 import h5py
 import numpy as np
