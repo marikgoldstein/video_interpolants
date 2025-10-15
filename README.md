@@ -31,7 +31,9 @@ Assuming you have the data shards (necessary) and the vqvae checkpoints (necessa
 
 # Running the code
 
-check out main.py and configs.py. Main.py just exposes a few basic arguments
+Call main.py from a shell script with torchrun (required) and command line args. See run.sh for an example. Main then automatically runs the trainer.
+
+In more detail, first see main.py and configs.py. Main.py just exposes a few basic arguments
 - which dataset
 - which interpolant
 - whether or not to do an overfitting/debugging session (overfit arg can be "none" for regular experiment, "batch" for overfitting on a batch, or "one" for overfitting on a batch of one repeated datapoint). When overfitting, sampling always uses the overfitting batch for initial frames.
