@@ -49,7 +49,7 @@ The configs file then adds on many things. There is a shared section applicable 
 
 For an example, see run.sh. You can 
 
-Some DDP systems use 
+Some clusters are setup to use 
 
 ```
 GPUS="1"
@@ -61,7 +61,8 @@ while others use the older
 ```
 python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=${GPUS}"
 ```
-Using whichever works for you, you can run (overfitting on a batch using our interpolant)
+The differences usually only surface between whether the newer version can find the libraries in your virtual env if yoy use one.
+Using whichever torch run command works for you, you can run (overfitting on a batch using our interpolant)
 ```
 [ddp stuff] main.py --overfit batch --smoke_test 0 --check_nans 0 --interpolant_type ours"
 ```
