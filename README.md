@@ -4,7 +4,7 @@ This is a repo for conditional (semi-markovian) video modeling using stochastic 
 
 [Probabilistic Forecasting with Stochastic Interpolants and Föllmer Processes](https://arxiv.org/abs/2403.13724)
 
-Work done by Yifan Chen, Mark Goldstein, Mengjian Hua, Michael S. Albergo, Nicholas M. Boffi, and Eric Vanden-Eijnden.
+by Yifan Chen, Mark Goldstein, Mengjian Hua, Michael S. Albergo, Nicholas M. Boffi, and Eric Vanden-Eijnden.
 
 Repo maintained by MG and co-authors.
 
