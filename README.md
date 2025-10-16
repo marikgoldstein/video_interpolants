@@ -2,11 +2,13 @@
 
 This is a repo for conditional (semi-markovian) video modeling using stochastic interpolants, from the paper
 
-[Probabilistic Forecasting with Stochastic Interpolants and Föllmer Processes](https://arxiv.org/abs/2403.13724),
+[Probabilistic Forecasting with Stochastic Interpolants and Föllmer Processes](https://arxiv.org/abs/2403.13724)
 
-maintained by Mark Goldstein (MG) and co-authors.
+by Yifan Chen, Mark Goldstein, Mengjian Hua, Michael S. Albergo, Nicholas M. Boffi, and Eric Vanden-Eijnden.
 
-The original task studied here was defined by [RIVER](https://github.com/Araachie/river). RIVER conditionally model sframe T+1 given frame T as well as a randomly chosen frame between 1 and T-1. The generative modeling is done in the latent space of a pre-trained VQVAE. The authors of this work adapted that code to study the choice of interpolant and how it affects results (not so much to study the overall video modeling technique or the VQGANs).
+Repo maintained by MG and co-authors.
+
+The original task studied here was defined by [RIVER](https://github.com/Araachie/river). RIVER conditionally models frame T+1 given frame T as well as a randomly chosen frame between 1 and T-1. The generative modeling is done in the latent space of a pre-trained VQVAE. The authors of this work adapted that code to study the choice of interpolant and how it affects results (not so much to study the overall video modeling technique or the VQGANs).
 
 A few notes:
 
@@ -29,7 +31,9 @@ Assuming you have the data shards (necessary) and the vqvae checkpoints (necessa
 
 # Running the code
 
-check out main.py and configs.py. Main.py just exposes a few basic arguments
+Call main.py from a shell script with torchrun (required) and command line args. See run.sh for an example. Mai.py launches the trainer, with all training logic defined in trainer.py
+
+In more detail, first see main.py and configs.py. Main.py just exposes a few basic arguments
 - which dataset
 - which interpolant
 - whether or not to do an overfitting/debugging session (overfit arg can be "none" for regular experiment, "batch" for overfitting on a batch, or "one" for overfitting on a batch of one repeated datapoint). When overfitting, sampling always uses the overfitting batch for initial frames.
@@ -43,33 +47,33 @@ The configs file then adds on many things. There is a shared section applicable 
 - the location of the vqvae checkpoints
 - the location where you would like to save results
 
-Then, run main.py with appropriate args. This should call train.py and the train loop should start.
+For an example, see run.sh. You can 
 
-For an example, see run.sh. YOu can 
-
-Some DDP systems use 
+Some clusters are setup to use 
 
 ```
-torchrun --standalone --nnodes=1 --nproc_per_node=${GPUS}
+GPUS="1"
+TORCHRUN="torchrun --standalone --nnodes=1 --nproc_per_node=${GPUS}"
 ```
 
 while others use the older
 
 ```
-python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=${GPUS}"
+TORCHRUN="python -m torch.distributed.run --standalone --nnodes=1 --nproc_per_node=${GPUS}"
 ```
-Using whichever works for you, you can run (overfitting on a batch using our interpolant)
+The differences usually only surface between whether the newer version can find the libraries in your virtual env, if you use one.
+Using whichever command works for you, you can run (overfitting on a batch using our interpolant)
 ```
-[ddp stuff] main.py --overfit batch --smoke_test 0 --check_nans 0 --interpolant_type ours"
+${TORCHRUN} main.py --overfit batch --smoke_test 0 --check_nans 0 --interpolant_type ours
 ```
 To load a checkpoint just add on
 ```
 --load_model_ckpt_path ${CKPT_PATH}
 ```
 
-If using CKPT the ```kth_model_ours.pt``` checkpoint use --interpolant_type ours, and if using the linear checkpoint, use --interpolant_type linear
+If using the checkpoint ```kth_model_ours.pt```, use ```--interpolant_type ours```, and if using the ```kth_model_linear.pt``` checkpoint, use ```--interpolant_type linear```
 
-To run a regular (non-overfitting/debugging) experiment, set --overfit batch to --overfit none
+To run a regular (non-overfitting/debugging) experiment, set ```--overfit batch``` to ```--overfit none```
 
 # What you should see
 
