@@ -45,32 +45,32 @@ def setup_data(
     # we do this because we get random subsets of each datapoint.
 
     train_sampler = torch.utils.data.RandomSampler(
-	datasets["train"],
-	replacement=True,
-	num_samples=(local_batch_size * num_training_steps),
-	generator=torch.Generator().manual_seed(local_seed)                                                                                                                                                
+        datasets["train"],
+        replacement=True,
+        num_samples=(local_batch_size * num_training_steps),
+        generator=torch.Generator().manual_seed(local_seed)                                                                                                                                                
     )
     
     train_dataloader = DataLoader(
-	dataset=datasets['train'],
-	batch_size=local_batch_size,
-	shuffle=False,
-	num_workers=num_workers,
-	sampler=train_sampler,
-	pin_memory=True,
-	drop_last=True,
+        dataset=datasets['train'],
+        batch_size=local_batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        sampler=train_sampler,
+        pin_memory=True,
+        drop_last=True,
     )
 
     val_sampler = torch.utils.data.SequentialSampler(datasets['val'])
     
     val_dataloader = DataLoader(
-	dataset=datasets['val'],
-	batch_size=local_batch_size,
-	shuffle=False,
-	num_workers=num_workers,
-	sampler=val_sampler,
-	pin_memory=True,
-	drop_last=True,
+        dataset=datasets['val'],
+        batch_size=local_batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        sampler=val_sampler,
+        pin_memory=True,
+        drop_last=True,
     )
 
     # dont need datasets or sampler in this code
