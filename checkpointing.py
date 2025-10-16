@@ -48,7 +48,7 @@ class Checkpointer:
     def time_to_save_most_recent(self, update_steps):
         return update_steps % self.save_most_recent_every == 0
 
-    def get_checkpoint_dict(self,):
+    def get_checkpoint_dict(self, update_steps):
 
         # save models in eval mode
         self.model.eval()
@@ -60,7 +60,8 @@ class Checkpointer:
             "model": self.model.module.state_dict() if is_ddp else self.model.state_dict(), 
             "ema": self.ema.state_dict(),
             "opt": self.opt.state_dict(),
-            "config": self.config
+            "config": self.config,
+            'step': update_steps,
         }
 
 
@@ -84,24 +85,24 @@ class Checkpointer:
     def _checkpoint_no_blocking(self, update_steps, mode = None):
         
         if mode == 'init':
-            checkpoint = self.get_checkpoint_dict()
+            checkpoint = self.get_checkpoint_dict(update_steps)
             checkpoint_path = f"{self.checkpoint_dir}/init.pt"
             self.save_ckpt_to_file(checkpoint, checkpoint_path)
 
         elif mode == 'final':
-            checkpoint = self.get_checkpoint_dict()
+            checkpoint = self.get_checkpoint_dict(update_steps)
             checkpoint_path = f"{self.checkpoint_dir}/final.pt"
             self.save_ckpt_to_file(checkpoint, checkpoint_path)
         
         else:
 
             if self.time_to_save(update_steps):
-                checkpoint = self.get_checkpoint_dict()
+                checkpoint = self.get_checkpoint_dict(update_steps)
                 checkpoint_path = f"{self.checkpoint_dir}/{update_steps:07d}.pt"
                 self.save_ckpt_to_file(checkpoint, checkpoint_path)
 
             if self.time_to_save_most_recent(update_steps):
-                checkpoint = self.get_checkpoint_dict()
+                checkpoint = self.get_checkpoint_dict(update_steps)
                 checkpoint_path = f"{self.checkpoint_dir}/latest.pt"
                 self.save_ckpt_to_file(checkpoint, checkpoint_path)
 
@@ -122,6 +123,8 @@ class Checkpointer:
             del state_dict['model']
             model_restored = True
 
+
+            # EMA MODEL 
             if 'ema' in state_dict:
                 self.ema.load_state_dict(state_dict["ema"])
                 ema_restored = True
@@ -131,6 +134,7 @@ class Checkpointer:
                 self.info("Checkpoint loaded but no EMA state. Will start a new EMA from loaded model.") 
                 ema_restored = False
 
+            # OPTIMIZER 
             if 'opt' in state_dict:
                 self.opt.load_state_dict(state_dict["opt"])
                 del state_dict['opt']
@@ -141,6 +145,7 @@ class Checkpointer:
                 self.info("(if optimization bad, maybe start with smaller LR)")
                 opt_restored = False
             
+            # OLD CONFIG FROM PREVIOUS RUN
             if 'config' in state_dict:
                 self.info("Checkpoint loaded and found old config, but not storing it + not overwriting current config")
                 self.info("feel free to modify Checkpointer code to do something with old config")
@@ -148,10 +153,22 @@ class Checkpointer:
             else:
                 self.info("Checkpoint loaded, but did not find an old config (not a problem)")
 
+
+            # TRAINING STEPS FROM PREVIOUS RUN
+            if 'update_steps' in state_dict:
+                update_steps = state_dict['update_steps']
+                self.info('Checkpoint loaded and found update_steps from previous run. Will return it to trainer and set update_steps to this number')
+             
+            else:
+                self.info('Checkpoint loaded, but did not find an old update_steps count from previous run. Will return 0')
+                update_steps = 0
+
+
         else:
+            update_steps = 0
             model_restored = False
             ema_restored = False
             opt_restored = False
-
-        return model_restored, ema_restored, opt_restored
+        
+        return update_steps, model_restored, ema_restored, opt_restored
 

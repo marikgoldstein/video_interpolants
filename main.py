@@ -27,6 +27,7 @@ from torchdiffeq import odeint
 
 # local stuff
 import utils
+import data_utils
 import configs
 import trainer
 
@@ -107,6 +108,23 @@ if __name__ == "__main__":
         checkpoint_dir = None # non-zero ranks should never touch checkpoint dir
         logger = utils.create_logger(None)
 
+    # dont need datasets or sampler in this code, just loaders
+    # (usually you need to set_epoch() on sampler but not with the above approach)
+    train_dataloader, val_dataloader = data_utils.setup_data(
+        data_path = config.data_path,
+        input_size = config.input_size, 
+        crop_size = config.crop_size, 
+        num_observations = config.num_observations, 
+        skip_frames = config.skip_frames, 
+        data_random_horizontal_flip = config.data_random_horizontal_flip, 
+        data_aug = config.data_aug, 
+        data_albumentations = config.data_albumentations, 
+        local_batch_size = local_batch_size, 
+        num_training_steps = config.num_training_steps, 
+        local_seed = local_seed, 
+        num_workers = config.num_workers,
+    )
+
     # INIT AND LAUNCH THE TRAINER!
     trainer = trainer.Trainer(
         config = config,
@@ -116,5 +134,7 @@ if __name__ == "__main__":
         checkpoint_dir = checkpoint_dir,
         logger = logger,
         local_batch_size = local_batch_size,
+        train_dataloader = train_dataloader,
+        val_dataloader = val_dataloader,
     )
     trainer.training_loop()

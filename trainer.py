@@ -4,10 +4,6 @@ import torch
 import torch.nn.functional as F
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
-from torchvision.datasets import ImageFolder
-from torchvision.utils import make_grid
 from torchvision import transforms
 from PIL import Image
 import os
@@ -29,15 +25,16 @@ import utils
 from utils import TensorFolder
 import arch
 import vqvae
-import video_dataset
 import configs
 import checkpointing
 
 class Trainer:
 
-    def __init__(self, config, rank, device, local_seed, checkpoint_dir, logger, local_batch_size):
+    def __init__(self, config, rank, device, local_seed, checkpoint_dir, logger, local_batch_size, train_dataloader, val_dataloader):
         
         self.config = config
+        self.train_dataloader = train_dataloader
+        self.val_dataloader = val_dataloader
         self.rank = rank
         self.device = device
         self.local_seed = local_seed
@@ -45,8 +42,6 @@ class Trainer:
         self.logger = logger
         self.local_batch_size = local_batch_size
         self.setup_model()
-        self.setup_data()
-        self.update_steps = 0
         self.interpolant = interpolants.get_interpolant(
             self.config.interpolant_type
         )
@@ -67,9 +62,10 @@ class Trainer:
         self.logger.info(f"Data path: {self.config.data_path}")
         self.logger.info(f"Checkpoint dir: {self.checkpoint_dir}")
         self.logger.info(f"Interpolant type: {self.config.interpolant_type}")
-        self.logger.info(f"Model checkpoint loaded: {self.is_resumed}")
+        self.logger.info(f"Model checkpoint loaded: {self.model_restored}")
         self.logger.info(f"EMA checkpoint loaded: {self.ema_restored}")
         self.logger.info(f"Optimizer checkpoint loaded: {self.opt_restored}")
+        self.logger.info(f"Starting from update_steps = {self.update_steps}")
         self.logger.info(f"VQVAE checkpoint loaded: {self.vae_restored} (should always be true...)") 
         self.logger.info('----------------------------------------------')
 
@@ -157,74 +153,25 @@ class Trainer:
             save_most_recent_every = self.config.save_most_recent_every,
         )
 
-        # maybe resume from ckpt for model, ema, opt
-        self.is_resumed, self.ema_restored, self.opt_restored = self.checkpointer.maybe_load(
+        # We have trained for zero steps
+        self.update_steps = 0
+
+        # maybe resume from ckpt for model, ema, opt. Also set update steps to previous checkpoint's value. 
+        self.update_steps, self.model_restored, self.ema_restored, self.opt_restored = self.checkpointer.maybe_load(
             ckpt_path = self.config.load_model_ckpt_path
         )
 
         # wrapp in DDP
         self.model = DDP(self.model.to(self.device), device_ids=[self.rank])
-        
-        # Just in case, ensure opt state on correct device after potential checkpoint load
-        for state in self.opt.state.values():
-            for k, v in state.items():
-                if isinstance(v, torch.Tensor):
-                    state[k] = v.to(self.device)
+       
+        # Then move all optimizer state tensors to that device
+        utils.move_opt_to_device(opt = self.opt, device = self.device)
 
         # sync ema to model if new, but don't overwrite ema if resuming.
         if not self.ema_restored:
             utils.update_ema(self.ema, self.model.module, decay=0)
 
         self.logger.info(f"Parameters: {sum(p.numel() for p in self.model.parameters()):,}")
-
-
-    def get_video_datasets(self, split):
-        return video_dataset.VideoDataset(
-            data_path=os.path.join(self.config.data_path, split),
-            input_size=self.config.input_size,
-            crop_size=self.config.crop_size,
-            frames_per_sample=self.config.num_observations,
-            skip_frames=self.config.skip_frames,
-            random_horizontal_flip=self.config.data_random_horizontal_flip,
-            aug=self.config.data_aug,
-            albumentations=self.config.data_albumentations,
-        )
-
-    def setup_data(self,):
-        self.datasets = {}
-        self.datasets['train'] = self.get_video_datasets(split = 'train')
-        self.datasets['val'] = self.get_video_datasets(split = 'val')
-    
-        # we use non-DDP Dataloader + per-rank-local-seed-Generator to support 
-        # sampling with replacement during training
-        # we do this because we get random subsets of each datapoint.
-
-        self.train_sampler = torch.utils.data.RandomSampler(
-            self.datasets["train"],
-            replacement=True,
-            num_samples=(self.local_batch_size * self.config.num_training_steps),
-            generator=torch.Generator().manual_seed(self.local_seed)
-        )
-        self.train_dataloader = DataLoader(
-            dataset=self.datasets['train'],
-            batch_size=self.local_batch_size,
-            shuffle=False, 
-            num_workers=self.config.num_workers,
-            sampler=self.train_sampler,
-            pin_memory=True,
-            drop_last=True,
-        )
-
-        self.val_sampler = torch.utils.data.SequentialSampler(self.datasets['val'])
-        self.val_dataloader = DataLoader(
-            dataset=self.datasets['val'],
-            batch_size=self.local_batch_size,
-            shuffle=False, 
-            num_workers=self.config.num_workers,
-            sampler=self.val_sampler,
-            pin_memory=True,
-            drop_last=True,
-        )
 
     def training_loop(self,):
         self.checkpointer.checkpoint(
@@ -401,7 +348,7 @@ class Trainer:
             num_training_steps = self.config.num_training_steps,
             warmup_steps = self.config.lr_warmup_steps, 
             schedule=self.config.lr_schedule,
-            is_resumed = self.is_resumed,
+            is_resumed = self.model_restored, # dont warmup if so
         )
 
         for pg in self.opt.param_groups:

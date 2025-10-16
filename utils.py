@@ -1,42 +1,30 @@
 # Some of this file is taken from https://github.com/Araachie/river
-
 import wandb
 import torch
-from torchvision.utils import make_grid
+import torch.nn as nn
 import torch.distributed as dist
+from torchvision.utils import make_grid
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from torchvision.datasets import ImageFolder
 from PIL import Image
 import os
 import argparse
 import hashlib
 import math
-import torch
-import torch.nn as nn
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
-from torchvision.datasets import ImageFolder
 from typing import List
 import numpy as np
-import torch
-import torch.nn.functional as F
-from torchvision.utils import make_grid
-from torchvision import transforms
 import numpy as np
 from collections import OrderedDict
-from PIL import Image
 from copy import deepcopy
 from glob import glob
-from time import time
-import argparse
 import logging
-import os
-from torchdiffeq import odeint
-from typing import List
-import torch
 
-
-
+def move_opt_to_device(opt, device):
+    for state in opt.state.values():
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor):
+                state[k] = v.to(device)
 
 
 class TensorFolder:
